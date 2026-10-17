@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+chrome-profile/
+tools/_gf_*/
+tools/probe_*.json
+tools/_*.txt
+tools/_*.html
+tools/_*.js
+tools/_*.json
+.superpowers/
