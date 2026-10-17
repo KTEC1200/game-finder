@@ -55,12 +55,12 @@ def test_parse_result_links_from_jidi_fixture():
     hits = parse_result_links(html, "https://www.jidiyouxi.com/search/detail/AI", s)
     assert hits, "jidiyouxi search page must yield hits"
     assert all("jidiyouxi.com" in h.url for h in hits)
-    # Task 7 基线：43 条（40 条 /topic/detail/ 详情页 + 3 条站点导航），
-    # 零静态资源泄漏；相对路径已 urljoin 成绝对 URL。
-    assert len(hits) == 43
+    # 剥壳前 43 条（40 详情 + 3 导航 /fcgame /lianji /problemTutorial）；
+    # 剥壳后导航被砍掉，只剩 40 条真结果，一条详情都没丢。
+    assert len(hits) == 40
     detail = [h for h in hits if h.score == 1.0]
     assert len(detail) == 40
-    assert all("/topic/detail/" in h.url for h in detail)
+    assert all("/topic/detail/" in h.url for h in hits)
     assert all(h.url.startswith("https://") for h in hits)
     assert not any("/undefined" in h.url for h in hits)
     assert not any(ASSET_RE.search(h.url) for h in hits)
@@ -88,13 +88,33 @@ def test_parse_result_links_from_g520_fixture():
     hits = parse_result_links(html, "https://www.gamer520.com/?s=AI", s)
     assert hits, "gamer520 search page must yield hits"
     assert any(h.url.rstrip('/').endswith('.html') for h in hits)
-    # Task 7 基线：31 条（22 条详情页 + 9 条导航），零静态资源泄漏。
-    assert len(hits) == 31
+    # 剥壳前 31 条（22 详情 + 9 导航）；剥壳后导航没了 → 21 条，全是详情页。
+    assert len(hits) == 21
     assert not any(ASSET_RE.search(h.url) for h in hits)
     # pick_best 必须选到真实文章，而不是 /pcplay 分类页。
     best = pick_best(hits, "AI")
     assert best is not None
     assert best.url == "https://www.gamer520.com/90467.html"
+
+
+def test_parse_result_links_drops_nav_menu_detail_links():
+    """站点菜单里的详情页形状链接不能冒充搜索结果。
+
+    真实缺陷（live 实测）：gamer520 用 enderlilies 搜索时，菜单项
+    `/122908.html`（Switch 固件整合包）与 `/61541.html` 与真结果同为
+    shape=1.0，被 pick_best 选中 → 整站给出错游戏的下载链接。
+    """
+    html = (
+        '<nav><ul><li class="menu-item"><a href="/122908.html">Switch 固件</a></li></ul></nav>'
+        '<article id="post-1"><h2><a href="/18974.html">终结的百合花 Ender Lilies</a></h2></article>'
+    )
+    s = _site(tpl="https://www.gamer520.com/?s={q}", sid="gamer520")
+    hits = parse_result_links(html, "https://www.gamer520.com/?s=enderlilies", s)
+    urls = [h.url for h in hits]
+    assert "https://www.gamer520.com/18974.html" in urls
+    assert "https://www.gamer520.com/122908.html" not in urls, (
+        "导航菜单里的详情页形状链接必须被剥掉"
+    )
 
 
 def test_pick_best_prefers_title_match():

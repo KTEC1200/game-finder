@@ -45,6 +45,27 @@ DETAILISH_RE = re.compile(
 )
 # 客户端路由未拿到数据时的占位链接
 JUNK_PATH_RE = re.compile(r"/(undefined|null|nan|NaN)(/|$|\?)")
+# 站点外壳（导航 / 页头页脚 / 侧栏）整块剥掉再解析。
+# 实测 gamer520 搜索页 12 个候选里 10 个来自 `<li class="menu-item">` 导航：
+# 其中 `/122908.html`（Switch 固件整合包）与 `/61541.html` 还是详情页形状，
+# shape 分会给 1.0，把搜索结果 `/18974.html`（终结的百合花）挤下去。
+# 剥壳后 12 → 2，正确页成为唯一 1.0。jidiyouxi 43 → 40 丢掉的 3 条
+# （/fcgame、/lianji、/problemTutorial）也全是导航，40 条真结果一条不少。
+CHROME_BLOCK_RE = re.compile(r"<(nav|header|footer|aside)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+CHROME_ATTR_RE = re.compile(
+    r'<(div|ul|li|section)\b[^>]*(?:class|id)=["\'][^"\']*'
+    r"(?:menu|navbar|nav-|sidebar|breadcrumb|widget|footer|header)"
+    r'[^"\']*["\'][^>]*>.*?</\1\s*>',
+    re.I | re.S,
+)
+
+
+def strip_chrome(html: str) -> str:
+    """剥掉导航/页头页脚/侧栏这些绝不可能是搜索结果的区域。
+
+    只做结构裁剪，不改链接判定逻辑本身：剥完仍走同一套 NAV_RE / 形状打分。
+    """
+    return CHROME_ATTR_RE.sub(" ", CHROME_BLOCK_RE.sub(" ", html))
 ANCHOR_RE = re.compile(r'<a\b([^>]*?)\bhref=["\']([^"\']+)["\']([^>]*)>', re.I)
 # <a title="..."> / <a><img alt="..."> 里的标题
 TITLE_ATTR_RE = re.compile(
@@ -95,7 +116,10 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
     - 相对路径先 urljoin 成绝对 URL（线上 jidiyouxi 就是相对路径）。
     - 同一 URL 出现多次（封面链接 + 标题链接）时保留信息量最大的标题。
     - 搜索页自身的排序/筛选变体（同 path、只差 query）不算结果。
+    - 先剥掉导航/页头页脚/侧栏（见 strip_chrome），否则站点菜单里的详情页形状
+      链接会冒充搜索结果（gamer520 实测就这么选错了游戏）。
     """
+    html = strip_chrome(html)
     titles: dict[str, str] = {}
     scores: dict[str, float] = {}
     order: list[str] = []
