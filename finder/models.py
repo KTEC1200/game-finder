@@ -1,0 +1,77 @@
+"""数据模型。全部用 dataclass，无第三方依赖。"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+Lang = Literal["zh", "en", "ja"]
+SearchMode = Literal["url", "form"]
+DownloadKind = Literal["direct", "pan", "magnet", "unknown"]
+AdapterStatus = Literal["verified", "untested", "broken"]
+
+
+@dataclass
+class SearchSpec:
+    mode: SearchMode
+    url_template: str | None = None          # mode="url" 时必需，含 {q}
+    input_selector: str | None = None        # mode="form"
+    submit_selector: str | None = None
+    result_link_selector: str | None = None
+    title_selector: str | None = None
+
+
+@dataclass
+class Site:
+    id: str
+    name: str
+    homepage: str
+    kinds: list[str]
+    langs: set[str]
+    url_searchable: bool
+    search: SearchSpec
+    tags: set[str] = field(default_factory=set)
+    needs_login: bool = False
+    max_query_len: int | None = None
+    adapter_status: AdapterStatus = "untested"
+    # 仅当 headless+真实UA 仍被 Cloudflare 拦时置 True，该站改用 headful
+    force_headful: bool = False
+
+
+@dataclass
+class SearchHit:
+    site_id: str
+    title: str
+    url: str
+    score: float = 0.0
+
+
+@dataclass
+class Download:
+    kind: DownloadKind
+    url: str
+    label: str = ""
+    code: str | None = None
+
+
+@dataclass
+class GameDetail:
+    site_id: str
+    url: str
+    title: str
+    cover_url: str | None = None
+    intro: str | None = None
+    version: str | None = None
+    size: str | None = None
+    updated_at: str | None = None
+    downloads: list[Download] = field(default_factory=list)
+    error: str | None = None
+    extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class HealthRecord:
+    site_id: str
+    status: str                  # ok / degraded / unreachable / needs_proxy / ...
+    latency_ms: int = 0
+    reason: str = ""
+    checked_at: str = ""         # ISO8601

@@ -1,0 +1,206 @@
+# 站点注册表。来源：C:\Users\27025\Desktop\网站链接（更新）.md（2026-10-17 用户实测）
+# mode=url 表示地址栏可用（用户给出模板）；mode=form 表示只能站内搜索。
+# langs 来自用户逐站标注。url_searchable 必须与 mode 一致。
+
+sites:
+  # ===== 单机（7）=====
+  - id: jidiyouxi
+    name: 机地
+    homepage: "https://www.jidiyouxi.com/"
+    kinds: [网盘]
+    langs: [zh]
+    search:
+      mode: url
+      url_template: "https://www.jidiyouxi.com/search/detail/{q}"
+
+  - id: playzip
+    name: PLAYZIP
+    homepage: "https://playzip.com/"
+    kinds: [直链]
+    langs: [en]
+    search:
+      mode: url
+      url_template: "https://playzip.com/?keywords={q}"
+
+  - id: byrutgame
+    name: BYRUTOP
+    homepage: "https://byrutgame.org/"
+    kinds: [直链, 磁力]
+    langs: [en]
+    search:
+      mode: url
+      url_template: "https://byrutgame.org/index.php?do=search&subaction=search&search_start=0&full_search=0&story={q}"
+
+  - id: gamer520
+    name: Gamer520
+    homepage: "https://www.gamer520.com/"
+    kinds: [网盘]
+    langs: [zh, en]
+    search:
+      mode: url
+      url_template: "https://www.gamer520.com/?s={q}"
+
+  - id: ankergames
+    name: ANKERGAMES
+    homepage: "https://ankergames.net/"
+    kinds: [直链, 磁力]
+    langs: [en]
+    search:
+      mode: url
+      url_template: "https://ankergames.net/search/{q}"
+
+  - id: gamebounty
+    name: GAMEBOUNTY
+    homepage: "https://gamebounty.world/zh"
+    kinds: [直链]
+    langs: [zh, en]
+    search:
+      mode: form
+      input_selector: null
+
+  - id: flysheep
+    name: flysheep 资源避难所
+    homepage: "https://www.flysheep6.com/"
+    kinds: [网盘, 磁力]
+    langs: [zh, en]
+    search:
+      mode: url
+      url_template: "https://www.flysheep6.com/?s={q}"
+
+  # ===== Galgame（15）=====
+  - id: sayafx
+    name: 月谣
+    homepage: "https://www.sayafx.top/"
+    kinds: [直链, 网盘]
+    langs: [zh, ja]
+    search:
+      mode: form
+      input_selector: null
+
+  - id: nyaa
+    name: Nyaa
+    homepage: "https://sukebei.nyaa.si/"
+    kinds: [磁力]
+    langs: [en, ja]
+    search:
+      mode: url
+      url_template: "https://sukebei.nyaa.si/?f=0&c=1_3&q={q}"
+
+  - id: nysoure
+    name: Nysoure
+    homepage: "https://nysoure.com/"
+    kinds: [直链]
+    langs: [zh, en, ja]
+    search:
+      mode: url
+      url_template: "https://nysoure.com/search?keyword={q}&sort=8"
+
+  - id: iacg
+    name: 爱之列车
+    homepage: "https://iacg.love/"
+    kinds: [网盘]
+    langs: [zh, en]
+    search:
+      mode: url
+      url_template: "https://iacg.love/?s={q}&type=post&trem=4"
+
+  - id: inarigal
+    name: 稻荷 GAL
+    homepage: "https://inarigal.com/"
+    kinds: [直链]
+    langs: [zh, ja]
+    search:
+      mode: url
+      url_template: "https://inarigal.com/?search={q}"
+
+  - id: lzacg
+    name: 量子 ACG
+    homepage: "https://lzacg.cc/"
+    kinds: [直链]
+    langs: [zh]
+    search:
+      mode: url
+      url_template: "https://lzacg.cc/?s={q}"
+
+  - id: acggw
+    name: ACG 港湾
+    homepage: "https://www.acggw.me/"
+    kinds: [网盘]
+    langs: [zh, en]
+    max_query_len: 10
+    search:
+      mode: url
+      url_template: "https://www.acggw.me/?post_type=post&s={q}"
+
+  - id: nekogal
+    name: NekoGAL
+    homepage: "https://www.nekogal.com/"
+    kinds: [直链]
+    langs: [zh, en, ja]
+    search:
+      mode: url
+      url_template: "https://www.nekogal.com/?s={q}"
+
+  - id: ggbases
+    name: GGBases
+    homepage: "https://ggbases.dlgal.com/"
+    kinds: [磁力]
+    langs: [en, ja]
+    search:
+      mode: url
+      url_template: "https://ggbases.dlgal.com/search.so?p=0&title={q}"
+
+  - id: touchgal
+    name: TouchGal
+    homepage: "https://www.touchgal.ink/"
+    kinds: [直链, 网盘]
+    langs: [zh, en, ja]
+    search:
+      mode: form
+      input_selector: null
+
+  - id: galgamex
+    name: Galgamex
+    homepage: "https://www.galgamex.net/"
+    kinds: [直链, 网盘]
+    langs: [zh, en, ja]
+    search:
+      mode: url
+      url_template: "https://www.galgamex.net/search?q={q}"
+
+  - id: kungal
+    name: 鲲 Galgame
+    homepage: "https://www.kungal.com/"
+    kinds: [论坛网盘]
+    langs: [zh, en, ja]
+    search:
+      mode: url
+      url_template: "https://www.kungal.com/search?keywords={q}"
+
+  - id: zi0
+    name: 梓澪的妙妙屋
+    homepage: "https://zi0.cc/"
+    kinds: [直链]
+    langs: [zh, en, ja]
+    search:
+      mode: form
+      input_selector: null
+
+  - id: anime-sharing
+    name: Anime-Sharing
+    homepage: "https://www.anime-sharing.com/"
+    kinds: [直链]
+    langs: [zh, en, ja]
+    search:
+      mode: form
+      input_selector: null
+
+  - id: galgame.dev
+    name: 真红的资源讨论组
+    homepage: "https://galgame.dev/"
+    kinds: [论坛网盘, 直链]
+    langs: [zh, en, ja]
+    needs_login: true
+    search:
+      mode: url
+      url_template: "https://galgame.dev/search?term={q}&in=titles"
