@@ -9,6 +9,7 @@ from finder.search import (
     clamp_query,
     parse_result_links,
     pick_best,
+    strip_chrome,
 )
 
 FIX = Path(__file__).resolve().parent / "fixtures"
@@ -88,13 +89,50 @@ def test_parse_result_links_from_g520_fixture():
     hits = parse_result_links(html, "https://www.gamer520.com/?s=AI", s)
     assert hits, "gamer520 search page must yield hits"
     assert any(h.url.rstrip('/').endswith('.html') for h in hits)
-    # 剥壳前 31 条（22 详情 + 9 导航）；剥壳后导航没了 → 21 条，全是详情页。
-    assert len(hits) == 21
+    # 剥壳后：20 条详情页(shape=1.0) + 5 条漏网的 0.5 分分类入口
+    # (pcplay / gameswitch / zhongwen / ign-hot / wp-login)。
+    # 分类入口是 0.5 分，永远排不到真结果前面，留着无害；
+    # 关键不变量是「菜单里的详情页形状链接已被剥掉」且 pick_best 选中真文章。
+    assert len(hits) == 25
+    assert len([h for h in hits if h.score == 1.0]) == 20
     assert not any(ASSET_RE.search(h.url) for h in hits)
     # pick_best 必须选到真实文章，而不是 /pcplay 分类页。
     best = pick_best(hits, "AI")
     assert best is not None
     assert best.url == "https://www.gamer520.com/90467.html"
+
+
+def test_strip_chrome_never_deletes_structural_containers():
+    """外壳剥离不得吞掉整页 / 正文容器。
+
+    真实事故：正则版 `nav-` 前缀命中了 gamer520 的
+    `<body class="...navbar-system">`，`header` 子串命中了 acggw 的
+    `.container-header` —— 两站整页被删，结果 17 条 → 0 条。
+    """
+    html = (
+        '<html><body class="search navbar-system">'
+        '<div class="container-header"><a href="/arpg">ARPG</a></div>'
+        '<main><article><a href="/game/12345">真结果</a></article></main>'
+        '<div class="menu-item"><a href="/122908.html">菜单</a></div>'
+        "</body></html>"
+    )
+    stripped = strip_chrome(html)
+    # 结构容器与其正文必须保留
+    assert "/game/12345" in stripped, "正文里的结果链接被删掉了"
+    assert "navbar-system" in stripped, "<body> 不能被剥"
+    assert "<main>" in stripped and "<article>" in stripped
+    # 外壳必须删掉
+    assert "/122908.html" not in stripped, "菜单项应被剥掉"
+
+
+def test_strip_chrome_keeps_entry_header_inside_article():
+    """文章内部的 <header class="entry-header"> 是标题，不是站点页头。"""
+    html = (
+        '<main><article>'
+        '<header class="entry-header"><a href="/18974.html">终结的百合花</a></header>'
+        "</article></main>"
+    )
+    assert "/18974.html" in strip_chrome(html)
 
 
 def test_parse_result_links_drops_nav_menu_detail_links():

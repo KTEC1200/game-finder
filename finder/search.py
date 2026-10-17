@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlparse
 
 from .models import SearchHit, Site
@@ -45,27 +46,134 @@ DETAILISH_RE = re.compile(
 )
 # 客户端路由未拿到数据时的占位链接
 JUNK_PATH_RE = re.compile(r"/(undefined|null|nan|NaN)(/|$|\?)")
-# 站点外壳（导航 / 页头页脚 / 侧栏）整块剥掉再解析。
-# 实测 gamer520 搜索页 12 个候选里 10 个来自 `<li class="menu-item">` 导航：
+# ---- 站点外壳剥离 ----------------------------------------------------------
+# 实测 gamer520 搜索页 12 个候选里 10 个来自站点菜单：
 # 其中 `/122908.html`（Switch 固件整合包）与 `/61541.html` 还是详情页形状，
-# shape 分会给 1.0，把搜索结果 `/18974.html`（终结的百合花）挤下去。
-# 剥壳后 12 → 2，正确页成为唯一 1.0。jidiyouxi 43 → 40 丢掉的 3 条
-# （/fcgame、/lianji、/problemTutorial）也全是导航，40 条真结果一条不少。
-CHROME_BLOCK_RE = re.compile(r"<(nav|header|footer|aside)\b[^>]*>.*?</\1\s*>", re.I | re.S)
-CHROME_ATTR_RE = re.compile(
-    r'<(div|ul|li|section)\b[^>]*(?:class|id)=["\'][^"\']*'
-    r"(?:menu|navbar|nav-|sidebar|breadcrumb|widget|footer|header)"
-    r'[^"\']*["\'][^>]*>.*?</\1\s*>',
-    re.I | re.S,
+# shape 会给 1.0，把真结果 `/18974.html`（终结的百合花）挤下去 →
+# 整站返回错游戏的网盘链接。剥掉外壳后正确页成为唯一 1.0。
+#
+# 必须是「平衡扫描」而不是正则：`<div[^>]*menu.*?</div>` 这种写法会在
+# 第一个 </div> 就截断（嵌套错的），而子串匹配 `header` 会把 acggw 的
+# `.container-header` 整页吞掉（实测 17 条结果 → 0 条）。
+# 所以：维护标签栈、按空白分隔的 class token 精确匹配、且绝不删结构容器。
+CHROME_TAGS = {"nav", "header", "footer", "aside"}
+# WordPress 把文章标题放在 <header class="entry-header"> 里 ——
+# 在文章/正文容器内部的 header/footer/aside 不是站点外壳，不能删。
+NESTED_OK_TAGS = {"article", "main", "section"}
+CHROME_EXACT = {
+    "menu", "navbar", "sidebar", "breadcrumb", "widget", "nav",
+    "site-header", "site-footer", "site-nav", "main-nav", "top-nav",
+    "mainmenu", "main-menu", "sub-menu", "submenu", "mobile-nav",
+    "header-nav", "footer-nav", "menu-nav", "menu-item", "menu-user-box",
+}
+# 前缀必须窄：`nav-` 会命中 `<body class="...navbar-system">`，整页被删。
+CHROME_PREFIX = (
+    "menu-item", "menu-nav", "navbar-", "breadcrumb-",
+    "sidebar-", "widget-", "site-header", "site-footer",
+    "main-nav", "top-nav", "mobile-nav", "header-nav", "footer-nav",
 )
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+}
+# 删掉任何一个都会毁掉页面或其正文，永远保留。
+_NEVER_STRIP = {"html", "body", "main", "article", "section"}
+
+
+def _chrome_class(value: str) -> bool:
+    for tok in re.split(r"\s+", (value or "").strip()):
+        if not tok:
+            continue
+        low = tok.lower()
+        if low in CHROME_EXACT or any(low.startswith(p) for p in CHROME_PREFIX):
+            return True
+    return False
+
+
+class _ChromeScanner(HTMLParser):
+    """扫一遍标签栈，记录所有外壳区域的字符区间。"""
+
+    def __init__(self, html: str):
+        super().__init__(convert_charrefs=False)
+        self.html = html
+        self._line_starts = [0]
+        for m in re.finditer(r"\n", html):
+            self._line_starts.append(m.end())
+        self._stack: list[tuple[str, bool, int]] = []
+        self.spans: list[tuple[int, int]] = []
+
+    def _offset(self) -> int:
+        line, col = self.getpos()
+        return self._line_starts[line - 1] + col
+
+    def _inside_content(self) -> bool:
+        return any(t in NESTED_OK_TAGS for t, _, _ in self._stack)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _VOID_TAGS:
+            return
+        chrome = False
+        if tag in CHROME_TAGS:
+            chrome = tag == "nav" or not self._inside_content()
+        if not chrome:
+            ad = dict(attrs)
+            chrome = _chrome_class(ad.get("class", "")) or _chrome_class(ad.get("id", ""))
+        if tag in _NEVER_STRIP:
+            chrome = False
+        self._stack.append((tag, chrome, self._offset()))
+
+    def handle_endtag(self, tag):
+        if tag in _VOID_TAGS:
+            return
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] != tag:
+                continue
+            end = self._offset()
+            close = self.html.find(">", end)
+            stop = close + 1 if close != -1 else end
+            for _, chrome, start in self._stack[i:]:
+                if chrome:
+                    self.spans.append((start, stop))
+            del self._stack[i:]
+            return
+
+    def flush(self):
+        for _, chrome, start in self._stack:
+            if chrome:
+                self.spans.append((start, len(self.html)))
 
 
 def strip_chrome(html: str) -> str:
     """剥掉导航/页头页脚/侧栏这些绝不可能是搜索结果的区域。
 
-    只做结构裁剪，不改链接判定逻辑本身：剥完仍走同一套 NAV_RE / 形状打分。
+    只做结构裁剪，链接判定仍走同一套 NAV_RE / 形状打分。
+    任何异常都退回原文：宁可留着壳，也不能把结果页切没了。
     """
-    return CHROME_ATTR_RE.sub(" ", CHROME_BLOCK_RE.sub(" ", html))
+    try:
+        sc = _ChromeScanner(html)
+        sc.feed(html)
+        sc.close()
+        sc.flush()
+        if not sc.spans:
+            return html
+        merged: list[list[int]] = []
+        for start, end in sorted(sc.spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        out, prev = [], 0
+        for start, end in merged:
+            if start > prev:
+                out.append(html[prev:start])
+            out.append(" ")
+            prev = max(prev, end)
+        out.append(html[prev:])
+        return "".join(out)
+    except Exception:  # noqa: BLE001 — 裁剪失败不该让整次搜索失败
+        return html
+
+
 ANCHOR_RE = re.compile(r'<a\b([^>]*?)\bhref=["\']([^"\']+)["\']([^>]*)>', re.I)
 # <a title="..."> / <a><img alt="..."> 里的标题
 TITLE_ATTR_RE = re.compile(
