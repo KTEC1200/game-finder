@@ -15,6 +15,8 @@ class SearchSpec:
     mode: SearchMode
     url_template: str | None = None          # mode="url" 时必需，含 {q}
     input_selector: str | None = None        # mode="form"
+    # 搜索框默认折叠、要先点这个元素才出现（gamebounty / touchgal 实测）
+    open_selector: str | None = None
     submit_selector: str | None = None
     result_link_selector: str | None = None
     title_selector: str | None = None

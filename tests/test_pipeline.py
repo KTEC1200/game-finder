@@ -3,8 +3,12 @@
 真站行为由 tools/smoke_live.py 负责（不进 pytest）；
 这里锁住的是「哪一层失败该报哪个错误」这条判定链。
 """
+import pytest
+
 from finder.models import SearchSpec, Site
 from finder.pipeline import (
+    FormSearchError,
+    _form_search,
     looks_blocked,
     looks_no_results,
     match_strength,
@@ -297,3 +301,254 @@ def test_detail_body_text_falls_back_to_html_when_evaluate_fails():
 
     text = _detail_body_text(_NoEvalPage(), "<html><body><p>终焉之莉莉</p></body></html>")
     assert "终焉之莉莉" in text
+
+
+# ---- form 模式搜索框定位 ---------------------------------------------------# 实测缺陷（2026-10-18）：5 个 form 站全部 FORM_FAILED TimeoutError Locator.fill。
+# 根因不是各站坏了，而是 .first 命中了 0x0 的隐藏 input：
+#   anime-sharing 首页 25 个 input，只有 1 个可见，前 8 个都叫 keywords
+#   gamebounty / touchgal / sayafx 的搜索框是折叠的，要先点搜索图标才出现
+#   zi0 首页没有任何搜索入口
+# 所以：必须按「可见性」挑输入框，并且允许先点开折叠搜索框。
+
+INPUT = "input[type=text]"
+
+
+class _FakeLocator:
+    def __init__(self, page, selector, matches):
+        self._page = page
+        self._selector = selector
+        self._matches = matches
+        self._idx = 0
+
+    @property
+    def first(self):
+        self._idx = 0
+        return self
+
+    def nth(self, i):
+        clone = _FakeLocator(self._page, self._selector, self._matches)
+        clone._idx = i
+        return clone
+
+    def count(self):
+        return len(self._matches)
+
+    def _cur(self):
+        return self._matches[self._idx]
+
+    def is_visible(self, timeout=0):
+        el = self._cur()
+        self._page.calls.append(("is_visible", self._selector, el["visible"]))
+        return el["visible"]
+
+    def fill(self, value, timeout=0):
+        el = self._cur()
+        if not el["visible"]:
+            raise RuntimeError("Element is not visible")
+        self._page.calls.append(("fill", self._selector, value))
+        el["value"] = value
+
+    def press(self, key):
+        self._page.calls.append(("press", self._selector, key))
+        if key == "Enter" and hasattr(self._page, "submit"):
+            self._page.submit()
+
+    def click(self, timeout=0):
+        el = self._cur()
+        if not el["visible"]:
+            raise RuntimeError("Element is not visible")
+        self._page.calls.append(("click", self._selector))
+        # 折叠搜索框在点击后才出现（gamebounty / touchgal 实测）
+        if el.get("reveals"):
+            self._page.reveal(el["reveals"])
+
+
+class _FakeFormPage:
+    """form 搜索用的最小 page：locator(sel) 按选择器匹配预先埋好的元素。"""
+
+    def __init__(self, elements, results_html="", results_url=None,
+                 anchors_sequence=None, navigates_to=None):
+        # elements: [{"selector": str, "visible": bool, "reveals": [...]}, ...]
+        self.elements = elements
+        self.calls = []
+        self.url = "https://form.test/"
+        self._results_html = results_html
+        self._results_url = results_url
+        self._anchors_sequence = list(anchors_sequence or [])
+        self._navigates_to = navigates_to
+        self._anchor_reads = 0
+
+    def reveal(self, elements):
+        self.elements.extend(elements)
+
+    def locator(self, selector):
+        matches = [e for e in self.elements if e["selector"] == selector]
+        return _FakeLocator(self, selector, matches)
+
+    def goto(self, url, **kw):
+        self.url = url
+        return type("_R", (), {"status": 200})()
+
+    def wait_for_load_state(self, *a, **kw):
+        pass
+
+    def wait_for_timeout(self, *a, **kw):
+        pass
+
+    def content(self):
+        return self._results_html
+
+    def title(self):
+        return "search results"
+
+    def evaluate(self, script):
+        # 只有取锚点的脚本需要按序返回快照；其他脚本返回空文本
+        if "querySelectorAll" not in script:
+            return ""
+        seq = self._anchors_sequence
+        if not seq:
+            return []
+        i = min(self._anchor_reads, len(seq) - 1)
+        self._anchor_reads += 1
+        return [{"href": h, "text": "", "vis": True} for h in seq[i]]
+
+    def submit(self):
+        """模拟「按回车真的触发了导航」。"""
+        if self._navigates_to:
+            self.url = self._navigates_to
+
+
+def _form_site(**search_kwargs) -> Site:
+    return Site(
+        id="fakeform",
+        name="FakeForm",
+        homepage="https://form.test/",
+        kinds=["网盘"],
+        langs={"zh"},
+        url_searchable=False,
+        search=SearchSpec(mode="form", **search_kwargs),
+    )
+
+
+def test_form_search_skips_hidden_input_and_fills_visible_one():
+    """anime-sharing 实测：前 8 个 input 都叫 keywords 但全是 0x0 隐藏框。"""
+    page = _FakeFormPage(
+        [
+            {"selector": "input[name=keywords]", "visible": False},
+            {"selector": "input[name=keywords]", "visible": False},
+        ]
+    )
+    # 第 3 个才是可见的那个
+    page.elements.append({"selector": "input[name=keywords]", "visible": True})
+    site = _form_site(input_selector="input[name=keywords]")
+    _form_search(page, site, "终焉之莉莉", timeout_ms=1000)
+
+    fills = [c for c in page.calls if c[0] == "fill"]
+    assert fills == [("fill", "input[name=keywords]", "终焉之莉莉")]
+    # 不能去点隐藏框上方的那个
+    pressed = [c for c in page.calls if c[0] == "press"]
+    assert pressed and pressed[0][2] == "Enter"
+
+
+def test_form_search_clicks_open_selector_when_box_is_collapsed():
+    """gamebounty / touchgal 实测：搜索框折叠，点搜索图标后才出现。"""
+    page = _FakeFormPage(
+        [
+            {
+                "selector": "[class*=search]",
+                "visible": True,
+                "reveals": [{"selector": "input[type=text]", "visible": True}],
+            }
+        ]
+    )
+    site = _form_site(open_selector="[class*=search]")
+    _form_search(page, site, "Ender Lilies", timeout_ms=1000)
+
+    assert ("click", "[class*=search]") in page.calls
+    fills = [c for c in page.calls if c[0] == "fill"]
+    assert fills and fills[0][2] == "Ender Lilies"
+
+
+def test_form_search_uses_explicit_submit_selector_when_given():
+    """有提交按钮时点按钮，不靠回车（站点可能拦 keydown）。"""
+    page = _FakeFormPage(
+        [
+            {"selector": "#q", "visible": True},
+            {"selector": "#go", "visible": True},
+        ]
+    )
+    site = _form_site(input_selector="#q", submit_selector="#go")
+    _form_search(page, site, "莉莉", timeout_ms=1000)
+
+    assert ("click", "#go") in page.calls
+    assert not [c for c in page.calls if c[0] == "press"]
+
+
+def test_form_search_raises_clear_error_when_no_input_anything():
+    """zi0 实测：首页没有任何搜索入口 → 必须报可读错误，不能静默。"""
+    page = _FakeFormPage([])
+    site = _form_site()
+    with pytest.raises(FormSearchError) as exc:
+        _form_search(page, site, "终焉之莉莉", timeout_ms=500)
+    assert "no visible input" in str(exc.value)
+
+
+def test_form_search_reports_no_effect_when_nothing_changed():
+    """gamebounty / sayafx 实测：输入+回车后 URL 不变、也没有新链接。
+
+    这是命令面板式搜索框（Ctrl+K）——回车不触发任何检索。此时页面上的
+    首页链接绝不能被当成搜索结果，必须报「搜索未生效」。
+    """
+    page = _FakeFormPage([{"selector": INPUT, "visible": True}])
+    site = _form_site(input_selector=INPUT)
+    outcome = _form_search(page, site, "终焉之莉莉", timeout_ms=500)
+    assert outcome.navigated is False
+    assert outcome.new_anchor_count() == 0
+    assert outcome.effective is False
+
+
+def test_form_search_effective_when_live_results_appear():
+    """anime-sharing 实测：不打转页面，但输入后有 5 条新结果链接出现。"""
+    page = _FakeFormPage(
+        [{"selector": INPUT, "visible": True}],
+        anchors_sequence=[["https://as.test/threads/1"],        # 输入前
+                          ["https://as.test/threads/1",
+                           "https://as.test/threads/2"]],        # 输入后
+    )
+    site = _form_site(input_selector=INPUT)
+    outcome = _form_search(page, site, "终焉之莉莉", timeout_ms=500)
+    assert outcome.navigated is False
+    assert outcome.new_anchor_count() == 1
+    assert outcome.effective is True
+
+
+def test_form_search_effective_when_page_navigates():
+    """真表单站（有 <form action>）：跳转本身就是效果，不需要新链接。"""
+    page = _FakeFormPage(
+        [{"selector": INPUT, "visible": True}],
+        anchors_sequence=[["https://f.test/a"], ["https://f.test/a"]],
+        navigates_to="https://f.test/search?q=x",
+    )
+    site = _form_site(input_selector=INPUT)
+    outcome = _form_search(page, site, "终焉之莉莉", timeout_ms=500)
+    assert outcome.navigated is True
+    assert outcome.effective is True
+
+
+def test_search_one_fails_instead_of_using_homepage_links():
+    """要害：搜索没生效时，绝不能把首页链接当搜索结果报成功。"""
+    page = _FakeFormPage(
+        [{"selector": INPUT, "visible": True}],
+        results_html=(
+            "<html><body>"
+            '<a href="/100-india-cats">100 India Cats</a>'
+            '<a href="/lords-and-villeins">Lords and Villeins</a>'
+            "</body></html>"
+        ),
+    )
+    site = _form_site(input_selector=INPUT)
+    card = search_one(page, site, "终焉之莉莉", timeout_ms=500)
+    assert card.error is not None
+    assert card.error.startswith("FORM_FAILED:")
+    assert "search did not execute" in card.error
+    assert card.downloads == []

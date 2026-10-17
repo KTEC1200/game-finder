@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -82,6 +83,175 @@ def _settle(page, ms: int = SETTLE_MS) -> None:
         page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:  # noqa: BLE001
         pass
+
+
+class FormSearchError(RuntimeError):
+    """form 模式找不到可用输入框 —— 与 Playwright 的超时区分开，便于报错归类。"""
+
+
+@dataclass
+class FormOutcome:
+    """form 搜索的执行结果。effective=False 时页面上的链接不是搜索结果。"""
+
+    navigated: bool = False
+    anchors_before: int = 0
+    anchors_after: int = 0
+
+    def new_anchor_count(self) -> int:
+        return max(0, self.anchors_after - self.anchors_before)
+
+    @property
+    def effective(self) -> bool:
+        """页面跳转过，或者原地长出了新链接（实时下拉）——都算搜索生效。
+
+        实测反例（2026-10-18）：
+          gamebounty / sayafx 是 Ctrl+K 命令面板，填字+回车后 URL 不变、
+          链接数不变（75→75、2420→2420），首页列表照旧在 → 不是结果。
+          anime-sharing 原地不动，但输入后多出 5 条匹配链接 → 是结果。
+        """
+        return self.navigated or self.new_anchor_count() > 0
+
+
+# 通用输入框候选，按「更像搜索框」排序
+GENERIC_INPUT_SELECTORS = (
+    "input[type=search]",
+    "input[name*=search i]",
+    "input[id*=search i]",
+    "input[placeholder*=搜索]",
+    "input[placeholder*=Search i]",
+    "input[placeholder*=搜索 i]",
+    "input[name*=keyword i]",
+    "input[name=s]",
+    "input[name*=s]",
+    "input[type=text]",
+)
+
+# 点击后能展开折叠搜索框的元素候选
+GENERIC_OPEN_SELECTORS = (
+    "[class*=search]",
+    "[id*=search i]",
+    "[aria-label*=earch]",
+    "button[title*=搜索]",
+    ".search-icon",
+)
+
+# 数页面链接用：只要 href，不需要标题
+_ANCHORS_JS = (
+    "() => Array.from(document.querySelectorAll('a[href]'))"
+    ".map(a => a.href)"
+)
+
+
+def _anchor_count(page) -> int:
+    try:
+        return len(page.evaluate(_ANCHORS_JS))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _first_visible(page, selector: str):
+    """在 selector 命中的元素里取第一个**可见**的；全不可见则返回 None。
+
+    这是本缺陷的要害：anime-sharing 首页 25 个 input、前 8 个都是 0x0 隐藏的
+    name=keywords，`locator(sel).first` 直接 fill 会一直等到超时。
+    """
+    try:
+        loc = page.locator(selector)
+        n = loc.count()
+    except Exception:  # noqa: BLE001
+        return None
+    for i in range(min(n, 20)):
+        try:
+            cand = loc.nth(i) if hasattr(loc, "nth") else loc.first
+            if cand.is_visible(timeout=500):
+                return cand
+        except Exception:  # noqa: BLE001
+            continue
+        if not hasattr(loc, "nth"):
+            break
+    return None
+
+
+def _open_collapsed_box(page, site: Site):
+    """搜索框折叠时先点开它（gamebounty / touchgal / sayafx 实测都需要）。"""
+    selectors = []
+    if site.search.open_selector:
+        selectors.append(site.search.open_selector)
+    selectors.extend(GENERIC_OPEN_SELECTORS)
+    for sel in selectors:
+        try:
+            el = _first_visible(page, sel)
+            if el is None:
+                continue
+            el.click(timeout=3000)
+            page.wait_for_timeout(900)
+            return sel
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _form_search(
+    page, site: Site, query: str, timeout_ms: int = SEARCH_TIMEOUT
+) -> FormOutcome:
+    """在首页填搜索框并提交。找不到输入框抛 FormSearchError，否则返回 FormOutcome。"""
+    input_selectors = (
+        [site.search.input_selector] if site.search.input_selector else []
+    ) + list(GENERIC_INPUT_SELECTORS)
+
+    box = None
+    for sel in input_selectors:
+        box = _first_visible(page, sel)
+        if box is not None:
+            break
+
+    if box is None:
+        if _open_collapsed_box(page, site):
+            for sel in input_selectors:
+                box = _first_visible(page, sel)
+                if box is not None:
+                    break
+
+    if box is None:
+        raise FormSearchError(
+            f"no visible input found on {site.homepage} "
+            f"(tried {len(input_selectors)} selectors)"
+        )
+
+    url_before = getattr(page, "url", "")
+    anchors_before = _anchor_count(page)
+
+    box.fill(query, timeout=10000)
+
+    # 实时下拉站（anime-sharing）在 fill 之后就已经出结果，再看一次
+    try:
+        page.wait_for_timeout(1200)
+    except Exception:  # noqa: BLE001
+        pass
+
+    submitted = False
+    if site.search.submit_selector:
+        try:
+            btn = _first_visible(page, site.search.submit_selector)
+            if btn is not None:
+                btn.click(timeout=5000)
+                submitted = True
+        except Exception:  # noqa: BLE001
+            pass
+    if not submitted:
+        box.press("Enter")
+
+    _settle(page, 3000)
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return FormOutcome(
+        navigated=getattr(page, "url", "") != url_before,
+        anchors_before=anchors_before,
+        anchors_after=_anchor_count(page),
+    )
     try:
         page.wait_for_timeout(ms)
     except Exception:  # noqa: BLE001
@@ -242,21 +412,29 @@ def search_one(
     else:
         status, nav_error = _goto(page, site.homepage, timeout_ms)
         _settle(page)
-        sel = (
-            site.search.input_selector
-            or "input[type=search], input[name*=s], input[type=text]"
-        )
         try:
-            box = page.locator(sel).first
-            box.fill(q, timeout=10000)
-            box.press("Enter")
-            _settle(page, 3000)
+            outcome = _form_search(page, site, q, timeout_ms)
         except Exception as exc:  # noqa: BLE001
             return GameDetail(
                 site_id=site.id,
                 url=getattr(page, "url", site.homepage),
                 title="",
                 error=f"FORM_FAILED: {type(exc).__name__}: {str(exc)[:150]}",
+                extra=extra,
+            )
+        extra["form_navigated"] = outcome.navigated
+        extra["form_new_anchors"] = outcome.new_anchor_count()
+        if not outcome.effective:
+            # 关键：搜索没生效时，页面上的链接是首页内容（导航/推荐列表），
+            # 当成结果会把「India Cats」这种无关游戏报成命中。
+            return GameDetail(
+                site_id=site.id,
+                url=getattr(page, "url", site.homepage),
+                title="",
+                error=(
+                    "FORM_FAILED: search did not execute "
+                    f"(url unchanged, no new links; {outcome.anchors_before} anchors)"
+                ),
                 extra=extra,
             )
         status = None
