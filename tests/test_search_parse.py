@@ -184,6 +184,24 @@ def test_parse_result_links_drops_terminal_nav_paths():
     assert hits == []
 
 
+def test_parse_result_links_drops_terminal_nav_with_trailing_slash():
+    """`/game/` 带尾斜杠同样是列表入口。
+
+    回归：TERMINAL_NAV_RE 原写作 `/(game|games|list|index\\.php)\\s*($|\\?)`，
+    匹配不到 `/game/`（斜杠之后才结束），而 DETAILISH_RE 的 `/game/` 规则
+    又把它打成 score 1.0 —— 于是 acggw 的 `/game/` 列表页会被当成详情页。
+    """
+    html = (
+        '<a href="/game/">游戏区</a>'
+        '<a href="/games/">游戏列表</a>'
+        '<a href="/list/">列表</a>'
+    )
+    s = _site(tpl="https://x.com/?s={q}", sid="x")
+    hits = parse_result_links(html, "https://x.com/?s=ender", s)
+    assert hits == []
+
+
+
 def test_parse_result_links_keeps_detail_paths_starting_with_game():
     """`/galgame/235041`、`/games/12345` 是详情页，不能被终端段规则误杀。"""
     html = (

@@ -34,7 +34,7 @@ NAV_RE = re.compile(
 # 终端段导航（`/game`、`/games`、`/index.php` 这类列表入口）。
 # 不能并进 NAV_RE：`game` 作为普通段会连 `/galgame/235041`、`/games/12345`
 # 一起吞掉。这里只认「路径到此结束」的形状（详见 parse_result_links）。
-TERMINAL_NAV_RE = re.compile(r"/(game|games|list|index\.php)\s*($|\?)", re.I)
+TERMINAL_NAV_RE = re.compile(r"/(game|games|list|index\.php)/?($|\?)", re.I)
 ASSET_RE = re.compile(
     r"\.(css|js|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|json|xml|txt|pdf)"
     r"($|\?)", re.I
