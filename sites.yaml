@@ -54,9 +54,12 @@ sites:
     homepage: "https://gamebounty.world/zh"
     kinds: [直链]
     langs: [zh, en]
+    # 实测 2026-10-18：首页只有 Ctrl+K 命令面板，回车不检索；
+    # 但 /zh/search?q= 是真实搜索页（1 条 enderlilies 结果），中文查 0 条。
+    # 详情页下载按钮是 /api/dl/{slug}/{base64url}，由 detail.py 解码。
     search:
-      mode: form
-      input_selector: null
+      mode: url
+      url_template: "https://gamebounty.world/zh/search?q={q}"
 
   - id: flysheep
     name: flysheep 资源避难所
@@ -68,14 +71,20 @@ sites:
       url_template: "https://www.flysheep6.com/?s={q}"
 
   # ===== Galgame（15）=====
+  # zi0（梓澪的妙妙屋）已移除：实测首页 5 个 input 全不可见，Control+k 唤不出，
+  # 全站唯一的搜索入口是外链 https://www.searchgal.top → 不可站内搜索。
   - id: sayafx
     name: 月谣
-    homepage: "https://www.sayafx.top/"
+    homepage: "https://www.sayafx.vip/"
     kinds: [直链, 网盘]
     langs: [zh, ja]
+    # 实测 2026-10-18：全站是 SPA，搜索框回车不触发检索，没有任何检索 API。
+    # 但站点自己下发了客户端搜索索引 /search.xml（760 条 <entry>），
+    # 浏览器端就是拿它在本地过滤的 → 用 index 模式复刻。
+    # 注意：索引里没有「终焉之莉莉」，查不到是站点真的没有，不是缺陷。
     search:
-      mode: form
-      input_selector: null
+      mode: index
+      index_url: "https://www.sayafx.vip/search.xml"
 
   - id: nyaa
     name: Nyaa
@@ -155,9 +164,17 @@ sites:
     homepage: "https://www.touchgal.ink/"
     kinds: [直链, 网盘]
     langs: [zh, en, ja]
+    # 实测 2026-10-18：首页无可见输入框；/search 页有（填+回车 → 共 N 个结果）；
+    # 7 个 URL 参数（keywords/q/query/keyword/search/s/title）全部无效 → 只能 form。
+    # 详情页网盘链接要点「下载」按钮后才渲染出 /{game}/resource/{id} 链接，
+    # 真链在 resource 页正文里（夸克 + 百度，实测 2026-10-18）。
     search:
       mode: form
-      input_selector: null
+      form_url: "https://www.touchgal.ink/search"
+      input_selector: "input"
+      open_selector: null
+      detail_open_selector: "button:has-text('下载')"
+      detail_follow_pattern: "/resource/\\d+"
 
   - id: galgamex
     name: Galgamex
@@ -177,23 +194,17 @@ sites:
       mode: url
       url_template: "https://www.kungal.com/search?keywords={q}"
 
-  - id: zi0
-    name: 梓澪的妙妙屋
-    homepage: "https://zi0.cc/"
-    kinds: [直链]
-    langs: [zh, en, ja]
-    search:
-      mode: form
-      input_selector: null
-
   - id: anime-sharing
     name: Anime-Sharing
     homepage: "https://www.anime-sharing.com/"
     kinds: [直链]
     langs: [zh, en, ja]
+    # 实测 2026-10-18：/search/1/?q= 直接可用（英文 8 条 / 日文 40 条），
+    # 比首页那个半隐藏的 keywords 表单稳。帖子正文里有 rapidgator/katfile
+    # 的直链（filehost 类），无需登录即可读。
     search:
-      mode: form
-      input_selector: null
+      mode: url
+      url_template: "https://www.anime-sharing.com/search/1/?q={q}"
 
   - id: galgame.dev
     name: 真红的资源讨论组

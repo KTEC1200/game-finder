@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Lang = Literal["zh", "en", "ja"]
-SearchMode = Literal["url", "form"]
-DownloadKind = Literal["direct", "pan", "magnet", "unknown"]
+SearchMode = Literal["url", "form", "index"]
+DownloadKind = Literal["direct", "pan", "magnet", "filehost", "unknown"]
 AdapterStatus = Literal["verified", "untested", "broken"]
 
 
@@ -14,12 +14,21 @@ AdapterStatus = Literal["verified", "untested", "broken"]
 class SearchSpec:
     mode: SearchMode
     url_template: str | None = None          # mode="url" 时必需，含 {q}
+    # mode="form" 时可选：搜索框不在首页，先打开这个页面（touchgal 实测）
+    form_url: str | None = None
     input_selector: str | None = None        # mode="form"
     # 搜索框默认折叠、要先点这个元素才出现（gamebounty / touchgal 实测）
     open_selector: str | None = None
     submit_selector: str | None = None
     result_link_selector: str | None = None
     title_selector: str | None = None
+    # mode="index"：站点的客户端搜索索引（sayafx 实测 /search.xml，760 条
+    # <entry><title>/<url>）。本地匹配，不经过搜索页。
+    index_url: str | None = None
+    # 详情页里链接要二次跳转才出现时用（touchgal 实测）：
+    # 先点 detail_open_selector 展开，再取匹配 detail_follow_pattern 的链接进去。
+    detail_open_selector: str | None = None
+    detail_follow_pattern: str | None = None
 
 
 @dataclass

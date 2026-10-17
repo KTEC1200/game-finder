@@ -19,10 +19,15 @@ def load_sites(path: Path | str | None = None) -> list[Site]:
         spec = SearchSpec(
             mode=s["mode"],
             url_template=s.get("url_template"),
+            form_url=s.get("form_url"),
             input_selector=s.get("input_selector"),
+            open_selector=s.get("open_selector"),
             submit_selector=s.get("submit_selector"),
             result_link_selector=s.get("result_link_selector"),
             title_selector=s.get("title_selector"),
+            index_url=s.get("index_url"),
+            detail_open_selector=s.get("detail_open_selector"),
+            detail_follow_pattern=s.get("detail_follow_pattern"),
         )
         out.append(
             Site(

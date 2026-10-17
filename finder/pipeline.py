@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlparse
 
 from .detail import extract_card
 from .lang import CJK_RE, KANA_RE
-from .models import GameDetail, Site
+from .models import GameDetail, SearchHit, Site
 from .search import (
     _norm,
     build_search_url,
@@ -337,6 +337,84 @@ def _page_title(page) -> str:
         return ""
 
 
+# 客户端搜索索引（sayafx 实测：/search.xml 760 条 <entry><title>/<url>）。
+# 这种站没有可用的搜索页/搜索框，站点把索引整份发下来在浏览器里本地过滤。
+INDEX_ENTRY_RE = re.compile(
+    r"<entry>\s*<title>(.*?)</title>\s*<url>(.*?)</url>", re.I | re.S
+)
+
+
+def parse_search_index(xml: str) -> list[tuple[str, str]]:
+    """把站点的搜索索引 XML 解析成 [(标题, 相对URL)]。解不出就返回空表。"""
+    out: list[tuple[str, str]] = []
+    for m in INDEX_ENTRY_RE.finditer(xml or ""):
+        title = re.sub(r"<[^>]+>", "", m.group(1) or "")
+        title = re.sub(r"\s+", " ", title).strip()
+        url = (m.group(2) or "").strip()
+        if title and url:
+            out.append((title, url))
+    return out
+
+
+def hits_from_index(
+    entries: list[tuple[str, str]], site: Site, query: str, base_url: str,
+    limit: int = 20,
+) -> list[SearchHit]:
+    """在本地索引里按查询词过滤，产出与 parse_result_links 同形的 SearchHit。
+
+    匹配规则刻意保守（索引条目少、标题是人工写的）：
+      1. 整个查询词出现（忽略大小写/空白/标点）→ 命中
+      2. 否则查询词的每个「词」（空白切分）都出现 → 命中
+    不做逐字模糊匹配：sayafx 上用「终焉之莉莉」做逐字匹配会命中 118 条
+    毫不相干的条目（实测），那等于没有搜索。
+    """
+    q = _norm(query)
+    if not q:
+        return []
+    words = [_norm(w) for w in re.split(r"\s+", (query or "").strip()) if w.strip()]
+    words = [w for w in words if w]
+
+    out: list[SearchHit] = []
+    for title, rel in entries:
+        t = _norm(title)
+        if q in t or (words and all(w in t for w in words)):
+            out.append(
+                SearchHit(
+                    site_id=site.id,
+                    title=title,
+                    url=urljoin(base_url, rel),
+                    score=1.0,
+                )
+            )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _index_search(
+    page, site: Site, query: str, timeout_ms: int = SEARCH_TIMEOUT
+) -> tuple[list[SearchHit], dict[str, Any]]:
+    """index 模式：直接取站点的搜索索引，在本地过滤。返回值与诊断信息。"""
+    info: dict[str, Any] = {"mode": "index"}
+    if not site.search.index_url:
+        raise FormSearchError(f"site {site.id} has no index_url configured")
+
+    resp = page.request.get(site.search.index_url, timeout=timeout_ms)
+    xml = resp.text()
+    entries = parse_search_index(xml)
+    info.update(
+        {
+            "index_url": site.search.index_url,
+            "index_status": getattr(resp, "status", None),
+            "index_bytes": len(xml),
+            "index_entries": len(entries),
+        }
+    )
+    hits = hits_from_index(entries, site, query, site.homepage)
+    info["index_hits"] = len(hits)
+    return hits, info
+
+
 def _detail_body_text(page, html: str) -> str:
     """详情页可见文本：优先 innerText（浏览器渲染后的正文），拿不到再退回 HTML 去标签。
 
@@ -405,12 +483,48 @@ def search_one(
     q, truncated = clamp_query(site, query)
     extra: dict[str, Any] = {"truncated": truncated, "query_used": q, "mode": site.search.mode}
 
+    if site.search.mode == "index":
+        # 索引站：没有可用搜索页，直接取整份索引在本地过滤。
+        try:
+            hits, idx_info = _index_search(page, site, q, timeout_ms)
+        except Exception as exc:  # noqa: BLE001
+            return GameDetail(
+                site_id=site.id,
+                url=site.homepage,
+                title="",
+                error=f"INDEX_FAILED: {type(exc).__name__}: {str(exc)[:150]}",
+                extra=extra,
+            )
+        extra.update(idx_info)
+        best = pick_best(hits, q)
+        if best is None:
+            return GameDetail(
+                site_id=site.id,
+                url=site.homepage,
+                title="",
+                error=f"NO_RESULTS: index has no entry matching {q!r}",
+                extra=extra,
+            )
+        rate, strength = match_strength(q, best.title)
+        extra.update(
+            {
+                "hits": len(hits),
+                "best_url": best.url,
+                "best_title": best.title[:200],
+                "best_score": best.score,
+                "match_rate": round(rate, 2),
+                "match": strength,
+            }
+        )
+        return _extract_detail(page, site, q, best.url, timeout_ms, extra)
+
     if site.search.mode == "url":
         url = build_search_url(site, q)
         status, nav_error = _goto(page, url, timeout_ms)
         _settle(page)
     else:
-        status, nav_error = _goto(page, site.homepage, timeout_ms)
+        start_url = site.search.form_url or site.homepage
+        status, nav_error = _goto(page, start_url, timeout_ms)
         _settle(page)
         try:
             outcome = _form_search(page, site, q, timeout_ms)
@@ -500,7 +614,19 @@ def search_one(
             error = "NO_RESULTS: pick_best returned None"
         return GameDetail(site_id=site.id, url=search_url, title="", error=error, extra=extra)
 
-    d_status, d_nav_error = _goto(page, best.url, timeout_ms)
+    return _extract_detail(page, site, q, best.url, timeout_ms, extra)
+
+
+def _extract_detail(
+    page,
+    site: Site,
+    q: str,
+    target_url: str,
+    timeout_ms: int,
+    extra: dict[str, Any],
+) -> GameDetail:
+    """进详情页并抽卡 + 内容证据闸门。url/form/index 三种模式共用这一段。"""
+    d_status, d_nav_error = _goto(page, target_url, timeout_ms)
     _settle(page)
     detail_url = page.url
     detail_html = page.content()
@@ -555,11 +681,91 @@ def search_one(
         return card
 
     if not card.downloads:
-        # gamer520 实测：详情页本身不含网盘链接，只有一个 /go?post_id=<id> 跳板。
-        # 不自动跟进：实测该跳板会把 post 带到 520.gamers520.com/<n>.html，
-        # 而落地页标题与 post 对不上（可能按登录态/推荐位分流），
-        # 自动跟进有把「别的游戏」的网盘链接挂到本结果上的风险。只记录证据。
-        card.extra["gate_links"] = _find_gate_links(detail_html, detail_url)
+        # 有些站详情页本身不含网盘链，要先点一个按钮才渲染出资源页链接
+        # （touchgal 实测：「下载」按钮点完才出现 /{game}/resource/{id}）。
+        followed = _follow_detail_gate(page, site, detail_url, timeout_ms, extra)
+        if followed is not None:
+            return followed
+        card.extra.update(extra)
+        if not card.downloads:
+            # gamer520 实测：详情页本身不含网盘链接，只有一个 /go?post_id=<id> 跳板。
+            # 不自动跟进：实测该跳板会把 post 带到 520.gamers520.com/<n>.html，
+            # 而落地页标题与 post 对不上（可能按登录态/推荐位分流），
+            # 自动跟进有把「别的游戏」的网盘链接挂到本结果上的风险。只记录证据。
+            card.extra["gate_links"] = _find_gate_links(detail_html, detail_url)
+            card.error = "NO_DOWNLOADS"
+    return card
+
+
+def _follow_detail_gate(
+    page, site: Site, detail_url: str, timeout_ms: int, extra: dict[str, Any]
+) -> GameDetail | None:
+    """详情页下载链要二次跳转时跟进一层（只在站里配了 detail_follow_pattern 时做）。
+
+    返回抽好的 GameDetail，或 None 表示该站不适用/没找到可跟进的链接。
+    只跟进一层：touchgal 的 resource 页就是终点，正文里直接是网盘链。
+    """
+    pattern = site.search.detail_follow_pattern
+    if not pattern:
+        return None
+
+    opened = None
+    if site.search.detail_open_selector:
+        try:
+            el = _first_visible(page, site.search.detail_open_selector)
+            if el is None:
+                el = page.get_by_role("button", name="下载").first
+            if el is not None:
+                try:
+                    empty = el.count() == 0
+                except Exception:  # noqa: BLE001
+                    empty = False
+                if not empty:
+                    el.click(timeout=8000)
+                    page.wait_for_timeout(3000)
+                    opened = site.search.detail_open_selector
+        except Exception as exc:  # noqa: BLE001
+            extra["detail_open_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+
+    rx = re.compile(pattern)
+    target = None
+    try:
+        html = page.content()
+        for m in re.finditer(r'href=["\']([^"\']+)["\']', html, re.I):
+            url = urljoin(detail_url, m.group(1))
+            if rx.search(urlparse(url).path or "") and url != detail_url:
+                target = url
+                break
+    except Exception as exc:  # noqa: BLE001
+        extra["detail_gate_scan_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+
+    extra["detail_opened"] = opened
+    if target is None:
+        extra["detail_follow_missing"] = pattern
+        return None
+
+    extra["detail_followed_url"] = target
+    status, nav_error = _goto(page, target, timeout_ms)
+    _settle(page)
+    final_url = page.url
+    html2 = page.content()
+    extra.update(
+        {
+            "detail2_url": final_url,
+            "detail2_status": status,
+            "detail2_body_len": len(html2),
+        }
+    )
+    if nav_error:
+        extra["detail2_nav_error"] = nav_error
+        return None
+    if looks_blocked(_page_title(page), html2):
+        extra["detail2_block_marker"] = looks_blocked(_page_title(page), html2)
+        return None
+
+    card = extract_card(html2, final_url, site.id)
+    card.extra.update(extra)
+    if not card.downloads:
         card.error = "NO_DOWNLOADS"
     return card
 

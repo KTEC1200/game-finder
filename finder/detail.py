@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import base64
 import html as html_mod
 import re
 from urllib.parse import unquote
@@ -21,6 +22,21 @@ PAN_DOMAINS = (
     "1fichier.com", "mediafire.com", "drive.google.com", "mypikpak.com",
     "115.com", "pikpak",
 )
+
+# 文件寄存商（anime-sharing 的帖子只有这类直链，实测 2026-10-18）：
+# rapidgator / katfile 各给一份，分卷用 PART1..PART6 的多个 URL 表示。
+FILEHOST_DOMAINS = (
+    "rapidgator.net", "katfile.com", "katfile.biz", "nitroflare.com",
+    "tezfiles.com", "fikper.com", "ddownload.com", "alfafile.net",
+    "fileditchfiles.me", "pixeldrain.com", "gofile.io", "buzzheavier.com",
+    "send.now", "workupload.com", "mixdrop.co", "1cloudfile.com",
+    "datanodes.to", "filemoon.sx", "krakenfiles.com", "uploadhaven.com",
+)
+
+# gamebounty 的下载按钮不指向文件主机本身，而是同源跳板：
+#   /api/dl/{slug}/{base64url(真实URL)}
+# 解码后才是 rapidgator/pixeldrain 之类的真链（实测 2026-10-18）。
+GB_DL_RE = re.compile(r"https?://[^\s\"'<>\\]*/api/dl/([^/\s\"'<>\\]+)/([A-Za-z0-9_\-=]+)")
 
 # 整页 HTML 里抓 pan/magnet 链接。排除紧跟的引号/反斜杠，避免把 JSON 转义带进来。
 URL_RE = re.compile(
@@ -63,15 +79,51 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", html_mod.unescape(s or "")).strip()
 
 
+def _trim_url(url: str) -> str:
+    """截掉 URL 后面粘连的非 URL 尾巴。
+
+    实测（touchgal，2026-10-18）：页面正文里存在 Markdown 文本
+    `[工具](https://pan.quark.cn/s/xxx)`，直接跑 URL_RE 会得到
+    `https://pan.quark.cn/s/xxx](https://pan.quark.cn/s/xxx` 这种畸形串，
+    既污染结果又会让去重失效。→ 在 `](` / `[` / 空白前截断，再去尾部标点。
+    """
+    for stop in ("](", "\\u002F]"):
+        idx = url.find(stop)
+        if idx > 0:
+            url = url[:idx]
+    return url.rstrip(".,);]}")
+
+
 def _classify(url: str) -> str:
     low = url.lower()
     if low.startswith("magnet:"):
         return "magnet"
     if any(d in low for d in PAN_DOMAINS):
         return "pan"
+    if any(d in low for d in FILEHOST_DOMAINS):
+        return "filehost"
     if re.search(r"/(download|dl|down|file)", low):
         return "direct"
     return "unknown"
+
+
+def decode_gb_dl_links(html: str) -> list[str]:
+    """解 gamebounty 的 /api/dl/{slug}/{base64url} 跳板，拿到真实文件主机 URL。
+
+    页面上点「下载完整游戏」链接到的是这种同源包装链接，真链被 base64url
+    编码在末段。解不出来就跳过（不猜）。
+    """
+    out: list[str] = []
+    for m in GB_DL_RE.finditer(html_mod.unescape(html)):
+        raw = m.group(2)
+        raw += "=" * (-len(raw) % 4)
+        try:
+            real = base64.urlsafe_b64decode(raw).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            continue
+        if real.startswith("http") and real not in out:
+            out.append(real)
+    return out
 
 
 def _extract_cover(html: str) -> str | None:
@@ -114,9 +166,13 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
     decoded = html_mod.unescape(html)
 
     for m in URL_RE.finditer(decoded):
-        url = m.group(0).rstrip(".,);]")
+        url = _trim_url(m.group(0))
+        if not url or len(url) < 12:
+            continue
         if QR_IMAGE_HOST_RE.search(url):
             continue  # 二维码图片；其载荷由 decode_qr_pan_links 提供
+        if "/api/dl/" in url:
+            continue  # gamebounty 跳板；真链由 decode_gb_dl_links 提供
         kind = _classify(url)
         if kind == "unknown":
             continue
@@ -131,6 +187,10 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
     for url in decode_qr_pan_links(html):
         if url not in seen:
             seen[url] = Download(kind=_classify(url), url=url, label="二维码")
+
+    for url in decode_gb_dl_links(html):
+        if url not in seen:
+            seen[url] = Download(kind=_classify(url), url=url, label="跳板解码")
 
     # 提取码：全局扫一遍，挂到没有 ?pwd= 的 pan 链接上
     codes = [c for c in CODE_RE.findall(decoded) if c]

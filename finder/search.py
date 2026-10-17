@@ -44,6 +44,17 @@ DETAILISH_RE = re.compile(
     r"(/\d{2,}|/game/|/detail|/post/|/topic/detail/|/subject/|/entry/|\.html$|/item/)",
     re.I,
 )
+# 纯 slug 型详情页（实测 2026-10-18，两条都曾被判成 0.5 分而选不中）：
+#   gamebounty  /ender-lilies-quietus-of-the-knights-free-pc-download
+#   touchgal    /6a4e9cad   （8 位十六进制 id，无任何「详情」词）
+# 判据刻意收窄，避免把导航页也算进来：
+#   - 路径以 -download / -free-download 结尾（gamebounty 全站文章形状）
+#   - 或**整条路径**就是一个 8-40 位十六进制/字母数字 id（touchgal 形状）
+SLUG_DETAIL_RE = re.compile(
+    r"(?:-download|/download(?:/|$))$"
+    r"|^/[0-9a-f]{8}(?:[0-9a-f]{0,32})/?$",
+    re.I,
+)
 # 客户端路由未拿到数据时的占位链接
 JUNK_PATH_RE = re.compile(r"/(undefined|null|nan|NaN)(/|$|\?)")
 # ---- 站点外壳剥离 ----------------------------------------------------------
@@ -263,7 +274,11 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
         if bare not in titles:
             order.append(bare)
             titles[bare] = title
-            scores[bare] = 1.0 if DETAILISH_RE.search(bare) else 0.5
+            scores[bare] = (
+                1.0
+                if DETAILISH_RE.search(bare) or SLUG_DETAIL_RE.search(path)
+                else 0.5
+            )
         elif len(title) > len(titles[bare]):
             titles[bare] = title
 
