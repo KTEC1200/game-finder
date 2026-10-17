@@ -14,6 +14,10 @@
   - 搜索页可能明确回「Nothing Found」（flysheep 实测），此时页面里仍有
     导航链接能凑出 hits，必须识别无结果文案，否则会把 dl=0 报成成功。
   - jidiyouxi 搜索页正文只有 ~160 字节，但链接不少；成败看链接数，不看正文长度。
+  - pick_best 只能在搜索页链接里挑，看不到详情页正文；标题打分并列时它会按
+    出现顺序选第一个（gamer520 实测：查 enderlilies 选中了固件整合包）。
+    所以选完之后必须再做一次**内容证据闸门**：详情页标题/正文里连一个查询词
+    都找不到，就是选错游戏，报 WRONG_GAME，绝不能挂上别的游戏的下载链接。
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from .detail import extract_card
+from .lang import CJK_RE, KANA_RE
 from .models import GameDetail, Site
 from .search import (
     _norm,
@@ -150,6 +155,60 @@ def _page_title(page) -> str:
         return page.title() or ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _detail_body_text(page, html: str) -> str:
+    """详情页可见文本：优先 innerText（浏览器渲染后的正文），拿不到再退回 HTML 去标签。
+
+    innerText 只在页面里取一次，不重新导航（详情页已经加载好了）。
+    取失败时用 HTML 兜底，绝不能因为拿不到正文就把它当成「选错游戏」。
+    """
+    try:
+        text = page.evaluate("() => document.body.innerText || ''")
+        if isinstance(text, str) and text.strip():
+            return text
+    except Exception:  # noqa: BLE001
+        pass
+    return _visible_text(html)
+
+
+def _query_evidence(query: str, title: str, body_text: str) -> int:
+    """查询词在详情页标题/正文里命中多少项（按语种给不同的计法）。
+
+    这是 pick_best 之后的**内容证据闸门**：pick_best 只看搜索页的链接标题，
+    看不到详情页正文；gamer520 实测查 `enderlilies` 时会选中一个「Switch 固件
+    整合包」的页面（标题里没有任何查询词），却挂着 3 条真实网盘链接 ——
+    用户会下到完全错误的游戏。所以选完之后必须验证页面上真提到了查询词。
+
+    计数（0 = 判为选错游戏）：
+      - CJK / 假名查询：按**不同汉字/假名字符**命中数计。单字命中很弱但非零，
+        所以门槛只卡「一个都没有」；跨译名的结果（终焉之莉莉 → 终结的百合花）
+        靠这一条兜住。标点不算证据，否则正文里的「：」就能把错页放行。
+      - 拉丁查询：按长度 >= 3 的词计，避免 "ai" 命中 "chained" 这类噪声。
+        命中判定：整词命中，或去掉分隔符后整串命中（"enderlilies" 要能对上
+        页面里的 "Ender Lilies"）；后者只对长度 >= 5 的词生效，防短词噪声。
+        若查询里所有词都短于 3（如 "AI"），仍按整词判，否则短查询永远是 0。
+      - 空 haystack / 空查询一律 0（查询为空什么也证明不了）。
+    """
+    hay = f"{title or ''} {body_text or ''}".lower()
+    if not hay.strip():
+        return 0
+    q = (query or "").strip().lower()
+    if not q:
+        return 0
+    if CJK_RE.search(q) or KANA_RE.search(q):
+        chars = {ch for ch in q if CJK_RE.match(ch) or KANA_RE.match(ch)}
+        return sum(1 for ch in chars if ch in hay)
+    parts = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+    toks = [t for t in parts if len(t) >= 3] or parts
+    compact_hay = re.sub(r"[^a-z0-9]+", "", hay)
+    found = 0
+    for t in toks:
+        if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", hay):
+            found += 1
+        elif len(t) >= 5 and t in compact_hay:
+            found += 1
+    return found
 
 
 def search_one(
@@ -292,6 +351,21 @@ def search_one(
 
     card = extract_card(detail_html, detail_url, site.id)
     card.extra.update(extra)
+
+    # 内容证据闸门（本文件头注释 / _query_evidence 详述）：
+    # pick_best 只看搜索页链接标题，看不见详情页正文。gamer520 实测查 enderlilies
+    # 会选中「Switch 固件整合包」——标题里 0 个查询词，却挂着 3 条真实网盘链接。
+    # 这种卡片对用户是「下载错游戏」，必须报错，绝不能当成功返回。
+    body_text = _detail_body_text(page, detail_html)
+    evidence = _query_evidence(q, card.title, body_text)
+    card.extra["evidence"] = evidence
+    card.extra["detail_text_len"] = len(body_text or "")
+    if evidence == 0:
+        card.extra["wrong_game"] = True
+        card.downloads = []          # 关键：不挂任何下载链接
+        card.error = "WRONG_GAME: no query evidence in page"
+        return card
+
     if not card.downloads:
         # gamer520 实测：详情页本身不含网盘链接，只有一个 /go?post_id=<id> 跳板。
         # 不自动跟进：实测该跳板会把 post 带到 520.gamers520.com/<n>.html，
