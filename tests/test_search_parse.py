@@ -99,9 +99,9 @@ def test_parse_result_links_from_g520_fixture():
 
 def test_pick_best_prefers_title_match():
     hits = [
-        SearchHit("x", "完全无关的内容", "https://e.com/1"),
-        SearchHit("x", "终焉之莉莉 Ender Lilies", "https://e.com/2"),
-        SearchHit("x", "其他游戏", "https://e.com/3"),
+        SearchHit("x", "完全无关的内容", "https://e.com/1", 1.0),
+        SearchHit("x", "终焉之莉莉 Ender Lilies", "https://e.com/2", 1.0),
+        SearchHit("x", "其他游戏", "https://e.com/3", 1.0),
     ]
     best = pick_best(hits, "终焉之莉莉")
     assert best is not None
@@ -131,3 +131,83 @@ def test_pick_best_prefers_title_start_over_later_mention():
 
 def test_pick_best_returns_none_on_empty():
     assert pick_best([], "x") is None
+
+
+# --- 回归（2026-10-17 真站冒烟）：导航页/捐赠页不得当结果 -------------------
+
+def test_pick_best_returns_none_when_no_detail_candidate():
+    """全部命中都是 0.5 分的导航链接时，必须诚实地返回 None。
+
+    旧实现 `... or hits` 会退回全集，于是 acggw 的 /game、nekogal 的
+    /forums?index=3、galgamex 的 /donations 都被当成了结果。
+    """
+    hits = [
+        SearchHit("x", "游戏区 | ACG港湾", "https://www.acggw.me/game", 0.5),
+        SearchHit("x", "捐赠支持 | Galgamex", "https://www.galgamex.net/donations", 0.5),
+    ]
+    assert pick_best(hits, "终焉之莉莉") is None
+
+
+def test_pick_best_picks_real_detail_when_one_exists():
+    hits = [
+        SearchHit("x", "游戏区 | ACG港湾", "https://www.acggw.me/game", 0.5),
+        SearchHit("x", "终焉之莉莉：骑士寂夜", "https://www.kungal.com/galgame/235041", 1.0),
+        SearchHit("x", "捐赠我们", "https://www.galgamex.net/donations", 0.5),
+    ]
+    best = pick_best(hits, "终焉之莉莉")
+    assert best is not None
+    assert best.url == "https://www.kungal.com/galgame/235041"
+
+
+def test_pick_best_never_returns_donations_when_detail_also_exists():
+    """标题完全匹配的捐赠页仍然不能赢过详情页（score 门禁在打分之前）。"""
+    hits = [
+        SearchHit("x", "终焉之莉莉 捐赠支持 Galgamex", "https://x.com/donations", 0.5),
+        SearchHit("x", "某游戏 详情", "https://x.com/games/12345", 1.0),
+    ]
+    best = pick_best(hits, "终焉之莉莉")
+    assert best is not None
+    assert best.url != "https://x.com/donations"
+    assert best.url == "https://x.com/games/12345"
+
+
+def test_parse_result_links_drops_terminal_nav_paths():
+    """裸 `/game`、`/games`、`/list`、`/index.php` 是列表入口，不是详情页。"""
+    html = (
+        '<a href="/game">游戏区</a>'
+        '<a href="/games">游戏列表</a>'
+        '<a href="/list">列表</a>'
+        '<a href="/index.php">首页</a>'
+    )
+    s = _site(tpl="https://x.com/?s={q}", sid="x")
+    hits = parse_result_links(html, "https://x.com/?s=ender", s)
+    assert hits == []
+
+
+def test_parse_result_links_keeps_detail_paths_starting_with_game():
+    """`/galgame/235041`、`/games/12345` 是详情页，不能被终端段规则误杀。"""
+    html = (
+        '<a href="/galgame/235041">终焉之莉莉</a>'
+        '<a href="/games/12345">终焉之莉莉</a>'
+    )
+    s = _site(tpl="https://x.com/?s={q}", sid="x")
+    hits = parse_result_links(html, "https://x.com/?s=ender", s)
+    urls = [h.url for h in hits]
+    assert "https://x.com/galgame/235041" in urls
+    assert "https://x.com/games/12345" in urls
+    assert all(h.score == 1.0 for h in hits)
+
+
+def test_parse_result_links_drops_nav_words_added_for_real_sites():
+    """真站实测路径：forums / thread / donations / archives / category / board。"""
+    html = (
+        '<a href="/forums?index=3">交流论坛</a>'
+        '<a href="/thread/123">帖子</a>'
+        '<a href="/donations">捐赠我们</a>'
+        '<a href="/archives/2026">归档</a>'
+        '<a href="/category/galgame">分类</a>'
+        '<a href="/board/games">版块</a>'
+    )
+    s = _site(tpl="https://x.com/?s={q}", sid="x")
+    hits = parse_result_links(html, "https://x.com/?s=ender", s)
+    assert hits == []

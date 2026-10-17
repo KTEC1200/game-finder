@@ -26,10 +26,15 @@ from urllib.parse import quote, urljoin, urlparse
 from .models import SearchHit, Site
 
 NAV_RE = re.compile(
-    r"/(login|register|signup|tag|tags|category|page/\d+|about|contact|"
+    r"/(login|register|signup|tag|tags|category|categor|page/\d+|about|contact|"
     r"privacy|terms|feed|rss|user|profile|search|wp-content|wp-admin|wp-json|"
-    r"wp-includes|assets|static|list|lists)(/|$|\?)", re.I
+    r"wp-includes|assets|static|list|lists|forums?|thread|donations?|archives?|"
+    r"board|boards)(/|$|\?)", re.I
 )
+# 终端段导航（`/game`、`/games`、`/index.php` 这类列表入口）。
+# 不能并进 NAV_RE：`game` 作为普通段会连 `/galgame/235041`、`/games/12345`
+# 一起吞掉。这里只认「路径到此结束」的形状（详见 parse_result_links）。
+TERMINAL_NAV_RE = re.compile(r"/(game|games|list|index\.php)\s*($|\?)", re.I)
 ASSET_RE = re.compile(
     r"\.(css|js|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|json|xml|txt|pdf)"
     r"($|\?)", re.I
@@ -109,6 +114,10 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
         path = urlparse(url).path or "/"
         if NAV_RE.search(path):
             continue
+        # 终端列表面（`/game`、`/games`、`/list`、`/index.php`）——真实冒烟里
+        # acggw 就落在 `/game` 上。只判「路径到此结束」，保住 `/games/12345`。
+        if TERMINAL_NAV_RE.search(path):
+            continue
         if ASSET_RE.search(url):
             continue
         if JUNK_PATH_RE.search(path):
@@ -156,8 +165,10 @@ def _query_pattern(q_raw: str) -> str | None:
 def pick_best(hits: list[SearchHit], query: str, min_score: float = 1.0) -> SearchHit | None:
     """标题与关键词匹配打分，取最高。
 
-    只在详情形状的链接（score >= min_score）里挑；一条都没有时才退回全集，
-    避免在只有分类页/首页可选时误选。
+    只在详情形状的链接（score >= min_score）里挑；**没有详情候选就返回 None**。
+    旧实现的 `or hits` 回退会在搜索页没有任何详情形状链接时，退到 0.5 分的
+    导航链接里挑，于是把 `/game`、`/forums?index=3`、`/donations` 当成结果
+    （2026-10-17 真站冒烟实测）。宁可报 NO_RESULTS，也不要给用户一个捐赠页卡片。
 
     打分（Task 7 修正后）：
       +12  查询词作为完整词/子串命中（拉丁词按词边界，CJK 按子串）
@@ -167,7 +178,9 @@ def pick_best(hits: list[SearchHit], query: str, min_score: float = 1.0) -> Sear
     """
     if not hits:
         return None
-    pool = [h for h in hits if h.score >= min_score] or hits
+    pool = [h for h in hits if h.score >= min_score]
+    if not pool:
+        return None          # 没有详情形状候选 -> 诚实地报「没找到」
     pattern = _query_pattern(query)
     rx = re.compile(pattern, re.I) if pattern else None
     qn = _norm(query)
