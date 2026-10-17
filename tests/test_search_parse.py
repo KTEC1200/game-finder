@@ -55,10 +55,31 @@ def test_parse_result_links_from_jidi_fixture():
     hits = parse_result_links(html, "https://www.jidiyouxi.com/search/detail/AI", s)
     assert hits, "jidiyouxi search page must yield hits"
     assert all("jidiyouxi.com" in h.url for h in hits)
-    # 实测基线：41 条，全部是 /topic/detail/ 详情页，零静态资源泄漏。
-    assert len(hits) == 41
-    assert all("/topic/detail/" in h.url for h in hits)
+    # Task 7 基线：43 条（40 条 /topic/detail/ 详情页 + 3 条站点导航），
+    # 零静态资源泄漏；相对路径已 urljoin 成绝对 URL。
+    assert len(hits) == 43
+    detail = [h for h in hits if h.score == 1.0]
+    assert len(detail) == 40
+    assert all("/topic/detail/" in h.url for h in detail)
+    assert all(h.url.startswith("https://") for h in hits)
+    assert not any("/undefined" in h.url for h in hits)
     assert not any(ASSET_RE.search(h.url) for h in hits)
+
+
+def test_parse_result_links_joins_relative_hrefs():
+    """线上 jidiyouxi 的结果链接是相对路径（Task 7 实测），必须 urljoin。
+
+    旧实现只收 http 开头的 href，真站上 hit=0。
+    """
+    html = (
+        '<a href="/topic/detail/959615543">终焉之莉莉：骑士寂夜</a>'
+        '<a href="/topic/detail/undefined">占位</a>'
+        '<a href="#top">top</a>'
+    )
+    s = _site(tpl="https://www.jidiyouxi.com/search/detail/{q}", sid="jidiyouxi")
+    hits = parse_result_links(html, "https://www.jidiyouxi.com/search/detail/x", s)
+    assert [h.url for h in hits] == ["https://www.jidiyouxi.com/topic/detail/959615543"]
+    assert hits[0].title.startswith("终焉之莉莉")
 
 
 def test_parse_result_links_from_g520_fixture():
@@ -67,13 +88,13 @@ def test_parse_result_links_from_g520_fixture():
     hits = parse_result_links(html, "https://www.gamer520.com/?s=AI", s)
     assert hits, "gamer520 search page must yield hits"
     assert any(h.url.rstrip('/').endswith('.html') for h in hits)
-    # 实测基线：35 条，零静态资源泄漏（NAV_RE/ASSET_RE 修正前是 39 条含 css/js）。
-    assert len(hits) == 35
+    # Task 7 基线：31 条（22 条详情页 + 9 条导航），零静态资源泄漏。
+    assert len(hits) == 31
     assert not any(ASSET_RE.search(h.url) for h in hits)
     # pick_best 必须选到真实文章，而不是 /pcplay 分类页。
     best = pick_best(hits, "AI")
     assert best is not None
-    assert best.url == "https://www.gamer520.com/122908.html"
+    assert best.url == "https://www.gamer520.com/90467.html"
 
 
 def test_pick_best_prefers_title_match():
@@ -83,6 +104,27 @@ def test_pick_best_prefers_title_match():
         SearchHit("x", "其他游戏", "https://e.com/3"),
     ]
     best = pick_best(hits, "终焉之莉莉")
+    assert best is not None
+    assert best.url == "https://e.com/2"
+
+
+def test_pick_best_latin_query_uses_word_boundary():
+    """短查询 "AI" 不能命中 "Chained" 里的 "ai"（Task 7 实测的误选）。"""
+    hits = [
+        SearchHit("x", "链兽角斗 Chained Beasts|官方中文", "https://e.com/1", 1.0),
+        SearchHit("x", "AI LIMIT 无限机兵|豪华中文", "https://e.com/2", 1.0),
+    ]
+    best = pick_best(hits, "AI")
+    assert best is not None
+    assert best.url == "https://e.com/2"
+
+
+def test_pick_best_prefers_title_start_over_later_mention():
+    hits = [
+        SearchHit("x", "Switch 固件合集 AI 工具包", "https://e.com/1", 1.0),
+        SearchHit("x", "AI LIMIT 无限机兵", "https://e.com/2", 1.0),
+    ]
+    best = pick_best(hits, "AI")
     assert best is not None
     assert best.url == "https://e.com/2"
 

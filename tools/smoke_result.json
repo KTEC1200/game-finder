@@ -1,0 +1,128 @@
+{
+  "query": "终焉之莉莉",
+  "lang": "zh",
+  "chrome_version": "155.0.8059.80",
+  "participating_for_lang": 17,
+  "skipped_by_lang": [
+    "playzip",
+    "byrutgame",
+    "ankergames",
+    "nyaa",
+    "ggbases"
+  ],
+  "form_only_skipped": [],
+  "unknown_requested": [],
+  "results": [
+    {
+      "site": "jidiyouxi",
+      "status": "ok",
+      "error": null,
+      "detail_url": "https://www.jidiyouxi.com/topic/detail/959615543",
+      "title": "终焉之莉莉：骑士寂夜中文版学习版免费下载 攻略秘籍剧情游戏讨论分享存档",
+      "title_len": 35,
+      "cover": true,
+      "cover_url": "https://img2.52jidi.com/topic/cover/id/931503/sz/420",
+      "version": "0.25",
+      "size": "2GB",
+      "updated_at": "2026-04-22",
+      "downloads": 2,
+      "kinds": [
+        "pan"
+      ],
+      "download_urls": [
+        "https://pan.baidu.com/s/1h2qNncvC7HwLggJUQjccbw?pwd=jrf8",
+        "https://pan.xunlei.com/s/VOqmxuqrby-F4G5a2DL7qlPBA1?pwd=vv5m#"
+      ],
+      "diagnostics": {
+        "truncated": false,
+        "query_used": "终焉之莉莉",
+        "mode": "url",
+        "hits": 4,
+        "search_url": "https://www.jidiyouxi.com/search/detail/%E7%BB%88%E7%84%89%E4%B9%8B%E8%8E%89%E8%8E%89",
+        "search_status": 200,
+        "search_body_len": 54669,
+        "search_title": "玩游戏来机地_3A大作_单机游戏_PC单机游戏下载_免费电脑单机游戏_存档",
+        "best_url": "https://www.jidiyouxi.com/topic/detail/959615543",
+        "best_title": "终焉之莉莉：骑士寂夜",
+        "best_score": 1.0,
+        "match_rate": 1.0,
+        "match": "strong",
+        "detail_url": "https://www.jidiyouxi.com/topic/detail/959615543",
+        "detail_status": 200,
+        "detail_body_len": 815737
+      },
+      "ms": 18575
+    },
+    {
+      "site": "gamer520",
+      "status": "no_downloads",
+      "error": "NO_DOWNLOADS",
+      "detail_url": "https://www.gamer520.com/18985.html",
+      "title": "终结的百合花 骑士们的救赎|豪华中文|Build.20834157-堕月哀鸣-灵殇夜祭+全DLC|解压即撸|",
+      "title_len": 54,
+      "cover": true,
+      "cover_url": "https://shared.cdn.queniuqe.com/store_item_assets/steam/apps/1369630/capsule_616x353.jpg?t=1713433509",
+      "version": "0.5",
+      "size": null,
+      "updated_at": "2026-03-05",
+      "downloads": 0,
+      "kinds": [],
+      "download_urls": [],
+      "diagnostics": {
+        "truncated": false,
+        "query_used": "终焉之莉莉",
+        "mode": "url",
+        "hits": 10,
+        "search_url": "https://www.gamer520.com/?s=%E7%BB%88%E7%84%89%E4%B9%8B%E8%8E%89%E8%8E%89",
+        "search_status": 200,
+        "search_body_len": 39882,
+        "search_title": "搜索结果 终焉之莉莉-Switch520",
+        "best_url": "https://www.gamer520.com/18985.html",
+        "best_title": "终结的百合花 骑士们的救赎|豪华中文|Build.20834157-堕月哀鸣-灵殇夜祭+全DLC|解压即撸|",
+        "best_score": 1.0,
+        "match_rate": 0.2,
+        "match": "weak",
+        "detail_url": "https://www.gamer520.com/18985.html",
+        "detail_status": 200,
+        "detail_body_len": 62184,
+        "gate_links": [
+          "https://www.gamer520.com/go?post_id=18985"
+        ]
+      },
+      "ms": 9459
+    },
+    {
+      "site": "flysheep",
+      "status": "error",
+      "error": "NO_RESULTS: nothing found",
+      "detail_url": "https://www.flysheep6.com/?s=%E7%BB%88%E7%84%89%E4%B9%8B%E8%8E%89%E8%8E%89",
+      "title": "",
+      "title_len": 0,
+      "cover": false,
+      "cover_url": null,
+      "version": null,
+      "size": null,
+      "updated_at": null,
+      "downloads": 0,
+      "kinds": [],
+      "download_urls": [],
+      "diagnostics": {
+        "truncated": false,
+        "query_used": "终焉之莉莉",
+        "mode": "url",
+        "hits": 2,
+        "search_url": "https://www.flysheep6.com/?s=%E7%BB%88%E7%84%89%E4%B9%8B%E8%8E%89%E8%8E%89",
+        "search_status": 200,
+        "search_body_len": 78210,
+        "search_title": "与终焉之莉莉匹配搜索结果 - flysheep",
+        "no_results_marker": "nothing found",
+        "best_url": "https://www.flysheep6.com/%e5%a4%a7%e5%9e%8b%e6%b8%b8%e6%88%8f%e7%b3%bb%e5%88%97",
+        "best_title": "🔍游戏搜索/大型系列游戏",
+        "best_score": 0.5,
+        "match_rate": 0.0,
+        "match": "none"
+      },
+      "ms": 6970
+    }
+  ]
+}
