@@ -1,0 +1,178 @@
+"""详情页抽取。
+
+实测要点（spec §2.1.3）：
+  - jidiyouxi 的网盘链接不在 <a> 标签，只在整页 HTML → 必须对 outerHTML 跑正则
+  - jidiyouxi 的 og:image 是坏字符串 "[object Object]" → 回退 <link rel=preload as=image>
+    （实测保存的 fixture 里连 preload 图也没有 → 再回退图片 CDN 的 id 规律）
+  - gamer520 落地页用二维码藏链接 → 解 data= 参数（注意 HTML 里是 &amp;data=）
+  - 二维码图片本身的 URL 不是下载链接 → 按 host 排除
+"""
+from __future__ import annotations
+
+import html as html_mod
+import re
+from urllib.parse import unquote
+
+from .models import Download, GameDetail
+
+PAN_DOMAINS = (
+    "pan.baidu.com", "pan.quark.cn", "pan.xunlei.com", "aliyundrive.com",
+    "alipan.com", "123pan.com", "lanzou", "cowtransfer.com", "mega.nz",
+    "1fichier.com", "mediafire.com", "drive.google.com", "mypikpak.com",
+    "115.com", "pikpak",
+)
+
+# 整页 HTML 里抓 pan/magnet 链接。排除紧跟的引号/反斜杠，避免把 JSON 转义带进来。
+URL_RE = re.compile(
+    r"https?://[^\s\"'<>\\]+",
+)
+MAGNET_RE = re.compile(r"magnet:\?xt=urn:btih:[a-zA-Z0-9]+")
+CODE_RE = re.compile(r"(?:提取码|密码|访问码|pwd)\s*[:：=]?\s*([a-zA-Z0-9]{4,8})")
+QR_RE = re.compile(
+    r"https?://[^\s\"'<>\\]*qrserver[^\s\"'<>\\]*[?&]data=([^&\"'<>\\]+)"
+)
+# 二维码图片本身（api.qrserver.com/...）不是下载链接；其载荷由 decode_qr_pan_links 解出。
+QR_IMAGE_HOST_RE = re.compile(r"qrserver\.com", re.I)
+PRELOAD_IMG_RE = re.compile(
+    r'<link[^>]+rel=["\']preload["\'][^>]+as=["\']image["\'][^>]+href=["\']([^"\']+)',
+    re.I,
+)
+# jidiyouxi 的图片 CDN 规律：img2.52jidi.com/topic/cover/id/<id>/sz/420
+# 页面里既可能是真斜杠，也可能是 JSON 转义的 \u002F，两种都认。
+COVER_ID_RE = re.compile(
+    r"img\d*\.52jidi\.com(?:\\u002F|/)(?:topic(?:\\u002F|/)cover|img(?:\\u002F|/)view)"
+    r"(?:\\u002F|/)id(?:\\u002F|/)(\d+)"
+)
+OG_IMAGE_RE = re.compile(
+    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)', re.I
+)
+OG_TITLE_RE = re.compile(
+    r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)', re.I
+)
+OG_DESC_RE = re.compile(
+    r'<meta[^>]+(?:property=["\']og:description["\']|name=["\']description["\'])'
+    r'[^>]+content=["\']([^"\']*)', re.I
+)
+TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+SIZE_RE = re.compile(r"\b\d+(?:\.\d+)?\s?(?:GB|MB|TB)\b")
+VERSION_RE = re.compile(r"\bV?\d+\.\d+(?:\.\d+)*(?:\.[A-Za-z]+\d+)?\b")
+DATE_RE = re.compile(r"20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}")
+
+
+def _clean(s: str) -> str:
+    return re.sub(r"\s+", " ", html_mod.unescape(s or "")).strip()
+
+
+def _classify(url: str) -> str:
+    low = url.lower()
+    if low.startswith("magnet:"):
+        return "magnet"
+    if any(d in low for d in PAN_DOMAINS):
+        return "pan"
+    if re.search(r"/(download|dl|down|file)", low):
+        return "direct"
+    return "unknown"
+
+
+def _extract_cover(html: str) -> str | None:
+    """封面三级回退：og:image → preload image → 图片 CDN id 规律。"""
+    # 1. og:image，除非是已知的 React 坏字符串
+    m = OG_IMAGE_RE.search(html)
+    if m:
+        cand = _clean(m.group(1))
+        if cand and "[object Object]" not in cand and cand.startswith("http"):
+            return cand
+    # 2. <link rel=preload as=image>（spec 里记录的线上页来源）
+    m = PRELOAD_IMG_RE.search(html)
+    if m:
+        cand = _clean(m.group(1))
+        if cand.startswith("http"):
+            return cand
+    # 3. jidiyouxi topic-cover id 规律（保存下来的 fixture 只有这个可用）
+    m = COVER_ID_RE.search(html)
+    if m:
+        return f"https://img2.52jidi.com/topic/cover/id/{m.group(1)}/sz/420"
+    return None
+
+
+def decode_qr_pan_links(html: str) -> list[str]:
+    """从二维码图片 URL 的 data= 参数里解出被编码的网盘链接。
+
+    注意：真实 HTML 里是 `&amp;data=`，所以必须先 unescape 再跑正则。
+    """
+    out: list[str] = []
+    for m in QR_RE.finditer(html_mod.unescape(html)):
+        raw = unquote(m.group(1))
+        if any(d in raw for d in PAN_DOMAINS) or raw.startswith("magnet:"):
+            out.append(raw)
+    return out
+
+
+def extract_downloads(html: str, page_url: str) -> list[Download]:
+    """从整页 HTML 抽下载链接。不依赖 <a> 标签 —— 这是 jidiyouxi 的关键。"""
+    seen: dict[str, Download] = {}
+    decoded = html_mod.unescape(html)
+
+    for m in URL_RE.finditer(decoded):
+        url = m.group(0).rstrip(".,);]")
+        if QR_IMAGE_HOST_RE.search(url):
+            continue  # 二维码图片；其载荷由 decode_qr_pan_links 提供
+        kind = _classify(url)
+        if kind == "unknown":
+            continue
+        if url not in seen:
+            seen[url] = Download(kind=kind, url=url, label=kind)
+
+    for m in MAGNET_RE.finditer(decoded):
+        url = m.group(0)
+        if url not in seen:
+            seen[url] = Download(kind="magnet", url=url, label="磁力")
+
+    for url in decode_qr_pan_links(html):
+        if url not in seen:
+            seen[url] = Download(kind=_classify(url), url=url, label="二维码")
+
+    # 提取码：全局扫一遍，挂到没有 ?pwd= 的 pan 链接上
+    codes = [c for c in CODE_RE.findall(decoded) if c]
+    pan_no_pwd = [d for d in seen.values() if d.kind == "pan" and "pwd=" not in d.url]
+    if codes and pan_no_pwd:
+        pan_no_pwd[0].code = codes[0]
+
+    return list(seen.values())
+
+
+def extract_card(html: str, page_url: str, site_id: str) -> GameDetail:
+    """抽一张结果卡：标题/封面/简介/版本/大小/日期/下载链。缺就留空，不猜。"""
+    title = ""
+    m = OG_TITLE_RE.search(html)
+    if m:
+        title = _clean(m.group(1))
+    if not title:
+        m = TITLE_TAG_RE.search(html)
+        if m:
+            title = _clean(m.group(1))
+
+    cover = _extract_cover(html)
+
+    intro = None
+    m = OG_DESC_RE.search(html)
+    if m:
+        intro = _clean(m.group(1))[:1500] or None
+
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = _clean(text)
+    size = (SIZE_RE.search(text).group(0) if SIZE_RE.search(text) else None)
+    version = (VERSION_RE.search(text).group(0) if VERSION_RE.search(text) else None)
+    date = (DATE_RE.search(text).group(0) if DATE_RE.search(text) else None)
+
+    return GameDetail(
+        site_id=site_id,
+        url=page_url,
+        title=title,
+        cover_url=cover,
+        intro=intro,
+        version=version,
+        size=size,
+        updated_at=date,
+        downloads=extract_downloads(html, page_url),
+    )
