@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+playwright==1.64.0
+pyyaml
+pytest

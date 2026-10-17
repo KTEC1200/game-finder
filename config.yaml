@@ -1,0 +1,32 @@
+proxy:
+  enabled: true
+  server: "http://127.0.0.1:6234"
+
+browser:
+  chrome_path: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+  profile_dir: "chrome-profile"
+  headless: true
+  # 留空则启动时从 chrome.exe 动态读取真实版本拼 UA
+  user_agent: ""
+
+search:
+  timeout_ms: 45000
+  detail_timeout_ms: 45000
+  page_pool: 4
+  min_interval_ms: 1500
+  max_detail_pages: 1
+
+cache:
+  ttl_hours: 12
+
+health:
+  interval_hours: 6
+  start_delay_s: 60
+  probe_words:
+    zh: "终焉之莉莉"
+    en: "enderlilies"
+    ja: "制服カノジョ"
+
+server:
+  host: "127.0.0.1"
+  port: 8734
