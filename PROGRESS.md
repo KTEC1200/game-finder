@@ -24,12 +24,12 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **349 个离线测试全绿** |
+| 代码 / 测试 | ✅ **357 个离线测试全绿** |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 + 换名提示 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
 | 缓存 | ✅ 重复搜索 **53.9s → 0.5s（115x）**，成功 12h / 失败 30min |
-| **出下载的站（中文「终焉之莉莉」）** | **3 / 16** — jidiyouxi、touchgal、gamer520 |
+| **出下载的站（中文「终焉之莉莉」）** | **2 / 16** — jidiyouxi、touchgal |
 | **出下载的站（英文「enderlilies」）** | **5 / 17** — ankergames、gamebounty、gamer520、playzip、touchgal |
 | **出下载的站（日文「制服カノジョ」）** | **8 / 11** — sayafx、nyaa、inarigal、nekogal、ggbases、touchgal、galgamex、anime-sharing |
 | 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板**（用户明确说不需要定时器） |
@@ -48,32 +48,36 @@ python app.py
 > **这张表是「审计视图」**：为了查站点行为，它对**每个语种都查了全部 21 站**，
 > 故意比真正的语种路由更宽。所以「某站 × 它不支持的语种」那一格**不代表用户
 > 会遇到的结果**（例如 playzip 是 en-only，它的中文格永远不会被真实查询触发）。
-> 用户真实看到的数字只看**参与站**：**中 3/16、英 5/17、日 8/11**（见上文）。
+> 用户真实看到的数字只看**参与站**：**中 2/16、英 5/17、日 8/11**（见上文）。
 > `sweep_par.py` 已改成只扫该语种参与的站，与本表口径不同是有意的。
 
 | 站 | 中文 | 英文 | 日文 |
 |---|---|---|---|
-| jidiyouxi | **dl=2** ✅ | NO_RESULTS | NO_RESULTS |
-| playzip | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| byrutgame | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| gamer520 | NO_DOWNLOADS | **dl=3** ✅ | NO_DOWNLOADS |
-| ankergames | NO_RESULTS | NO_DOWNLOADS | NO_RESULTS |
-| **gamebounty** | NO_RESULTS（中文确实 0 条） | **dl=4** ✅ | WRONG_GAME |
-| flysheep | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| **sayafx** | NO_RESULTS（索引里真没有） | NO_RESULTS | **dl=2** ✅ |
-| **nyaa** | NO_RESULTS | NO_RESULTS | **dl=8** ✅ |
-| nysoure | BLOCKED_SEARCH | BLOCKED_SEARCH | BLOCKED_SEARCH |
-| iacg | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| inarigal | NO_RESULTS | NO_RESULTS | NO_DOWNLOADS |
-| lzacg | BLOCKED_SEARCH | BLOCKED_SEARCH | BLOCKED_SEARCH |
-| acggw | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| nekogal | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| **touchgal** | **dl=4** ✅ | **dl=4** ✅ | **dl=3** ✅ |
-| **galgamex** | NO_RESULTS | NO_RESULTS | **dl=1** ✅ |
-| **kungal** | NO_DOWNLOADS（该游戏本体页暂无） | NO_RESULTS | NO_DOWNLOADS（同上） |
-| **ggbases** | NO_RESULTS（站点 0 条） | NO_RESULTS（站点 0 条） | **dl=7** ✅ |
-| **anime-sharing** | NO_RESULTS | NO_RESULTS | **dl=3** ✅ |
-| galgame.dev | NO_RESULTS | NO_RESULTS | NO_RESULTS |
+| jidiyouxi | **dl=2** ✅ | 无结果 | 搜索导航失败 |
+| playzip | 坐错游戏 | **dl=1** ✅ | 详情 404 |
+| byrutgame | 无结果 | 无结果 | 无结果 |
+| gamer520 | 仅跳板 | **dl=3** ✅ | 仅跳板 |
+| ankergames | 无结果 | **dl=1** ✅ | 无结果 |
+| gamebounty | 无结果（中文确实 0 条） | **dl=4** ✅ | 坐错游戏 |
+| flysheep | 无结果 | 无结果 | 无结果 |
+| sayafx | 无结果（索引里真没有） | 无结果 | **dl=2** ✅ |
+| nyaa | 无结果 | 无结果 | **dl=8** ✅ |
+| nysoure | 被拦 | 被拦 | 被拦 |
+| iacg | 无结果 | 无结果 | 无结果 |
+| inarigal | 无结果 | 无结果 | **dl=1** ✅ |
+| lzacg | 被拦 | 被拦 | 被拦 |
+| acggw | 无结果 | 无结果 | 无结果 |
+| nekogal | 无结果 | 无结果 | **dl=1** ✅ |
+| touchgal | **dl=3** ✅ | **dl=3** ✅ | **dl=3** ✅ |
+| galgamex | 无结果 | 无结果 | **dl=1** ✅ |
+| kungal | 无下载（该游戏本体页暂无） | 无结果 | 无下载（同上） |
+| ggbases | 无结果（站点 0 条） | 无结果（站点 0 条） | **dl=7** ✅ |
+| anime-sharing | 无结果 | 无结果 | **dl=5** ✅ |
+| galgame.dev | 需登录 | 需登录 | 需登录 |
+
+（审计口径合计：中 2/21、英 5/21、日 8/21；**用户真正的分母见上文** 中 16 / 英 17 / 日 11。
+非参与语种的格子里的报错——如 playzip 日文的「详情 404」、jidiyouxi 日文的
+「搜索导航失败」——**永远不会被真实查询触发**，不必修。）
 
 **关键判断：「没结果」不等于「坏了」。** 必须先做对照实验——用本站必定存在的游戏
 （`千恋万花` / `Summer Pockets`）验证搜索功能本身是否正常，再判断是「站上真没这款游戏」
@@ -258,6 +262,34 @@ python app.py
     守则：提示的 `innerHTML` 右值必须**严格来自常量表**（有测试卡这条），
     站点返回的字符串一律不许进 `innerHTML`（其余 UI 走 `el()` → `textContent`）。
 
+24. **自己造出来的「站点抖动」**（jidiyouxi，最隐蔽的一条）
+    现象：同一个中文查询时好时坏 —— 3 次里 1 次 `dl=2`、2 次 `NO_RESULTS`，
+    45s 间隔重测仍是「失败/失败/成功」，看着像站点随机空响应。
+    **先证伪了「限流」假设**（拉开间隔没改善），再直接轮询同一个页面：
+    **+4.0s 就 `hits=1`，两次都是** —— 说明结果本来就在，是我们自己弄丢的。
+    根因在暂态重试循环：`_TRANSIENT_TEXT_MIN = 300` 是按「正文至少 300 字」
+    猜的，而 jidiyouxi 是 JS 渲染页，**出结果时 `_visible_text` 也只有 250 字**
+    → `_looks_transient` 恒为 True → 每轮都 `_goto` 重载 → **把已经解析出来的
+    候选冲掉**，还要重新碰站点的空响应。
+    修法（`4a10d7f` + `c44779d`）：循环改成真正的轮询 ——
+    ① 任何时候解析出候选就 `break`，绝不重载；
+    ② 等待 4s 之后**必须再查一次候选**才决定要不要重载（只查一次不够，
+    第一版就漏在这里：22 站并行清扫下 jidiyouxi 依旧 hits=0）；
+    ③ `search_transient_retries` 只统计真正的重载次数。
+    效果：3/3 `dl=2`，耗时从 20–44s 降到 7–15s。
+    教训：**「站点不稳定」的结论必须先排除自己**。判据是「直接轮询原始页面」
+    这个不经过我们代码的观测。
+
+25. **搜索页长得像详情页 → 抖动被报成 `WRONG_GAME`**（jidiyouxi）
+    该站搜索模板是 `/search/detail/{q}`，路径形状与详情页一致。搜索页渲染成
+    空壳时 `_looks_detail_page` 只看路径 → 把搜索页当详情页去抽卡 → 报
+    `WRONG_GAME: no query evidence in page`（误导：像是「页面内容对不上查询」，
+    实际是站点抖了）。
+    修法：`_is_site_search_url(site, url)` —— 先按站点自己的 `url_template`
+    前缀排除搜索 URL，再退回通用 `/search|find|query` 路径段；
+    `_looks_detail_page` 命中即返回 False。
+    回归保护：inarigal 的「搜索 302 到 `/detail/64`」必须仍然认成详情页。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -265,8 +297,11 @@ python app.py
 - **jidiyouxi**：URL 模板 `search/detail/{q}`；详情页网盘链在整页 HTML 的 `#appState`
   SSR 数据里，`<a>` 标签 0 条外链；`og:image` 是坏字符串 `"[object Object]"`（站点自己的 bug）；
   不同游戏默认 tab 不同（本体/修改器/讨论求助）。
-- **gamer520**：`?s={q}`；详情页无直接网盘链，只有 `/go?post_id=` 跳板。
-  搜索页混着大量 WordPress 导航菜单链接，必须剥离站点外壳（平衡扫描，不是正则）。
+- **gamer520**：`?s={q}`；搜索页混着大量 WordPress 导航菜单链接，必须剥离站点外壳
+  （平衡扫描，不是正则）。详情页分两种：**有些帖子的 HTML 直接带 3 条百度盘链**
+  （如 `/18974.html`，英文查询命中），**有些帖子只有 `/go?post_id=` 跳板**且页面写
+  `文件密码：xxxx`（如中文查询命中的 `/18985.html`）。跳板落地页是第三方聚合站的
+  **用户上传帖**，与本次查询的游戏无归属关系 → 报 `NEEDS_GATE`，**不自动跟进**。
 - **gamebounty**：`/api/v1/search?q=&page=&size=` 也能用（返回 JSON）；
   `/api/dl/` 是 base64url 包装。
 - **kungal**：wiki + 论坛。`/galgame/<id>` 是 wiki 页，默认停在「游戏介绍」，
@@ -341,7 +376,7 @@ finder/health.py            classify / check_site（状态机就绪，无定时�
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
 finder/web/static/index.html  单页 UI
-tests/                      324 个离线测试 + fixtures
+tests/                      357 个离线测试 + fixtures
 ```
 
 ---
