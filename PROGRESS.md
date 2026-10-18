@@ -1,6 +1,6 @@
 # Game Finder — 实现进度与真实状态
 
-> 更新：2026-10-18（4 站适配完成，实测于 commit `1a209ab`）
+> 更新：2026-10-18（缓存 + 并发落地，实测于 commit `1a209ab` 之后）
 > 项目根目录：`C:\Users\27025\Desktop\game-finder\`
 > 设计文档：`docs\superpowers\specs\2026-10-16-game-finder-design.md`
 > 实现计划：`docs\superpowers\plans\2026-10-17-game-finder-implementation.md`
@@ -24,13 +24,15 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **180 个离线测试全绿** |
+| 代码 / 测试 | ✅ **209 个离线测试全绿** |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
-| UI | ✅ SSE 流式卡片 |
+| UI | ✅ SSE 流式卡片 + 强制刷新按钮 |
+| 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
+| 缓存 | ✅ 重复搜索 **53.9s → 0.5s（115x）**，成功 12h / 失败 30min |
 | **出下载的站（中文「终焉之莉莉」）** | **2 / 21** — jidiyouxi、touchgal |
 | **出下载的站（英文「enderlilies」）** | **3 / 21** — gamer520、gamebounty、touchgal |
 | **出下载的站（日文「制服カノジョ」）** | **5 / 21** — sayafx、nyaa、touchgal、galgamex、anime-sharing |
-| 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板** |
+| 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板**（用户明确说不需要定时器） |
 
 「诚实报错」是本版的重要目标：宁可显示「没找到」，也不给用户一张错误的卡片。
 
@@ -119,6 +121,16 @@ python app.py
    `api.qrserver.com/...&data=<urlencoded>` 要排除，载荷用 `unquote(data)` 解。
 5. **gamebounty 跳板本身不是下载链接**
    点击 `/api/dl/...` 返回 JSON，不是文件。必须解码后丢弃包装 URL。
+6. **sqlite 跨线程使用**（并发化时暴露，最隐蔽）
+   `ProgrammingError: SQLite objects created in a thread can only be used in that
+   same thread.` 该异常被单站兜底逻辑吞成 `.error` 字段，表现为「并发整批 0 成功、
+   0.5s 就结束」，从日志完全看不出是 sqlite 问题。
+   修法：`sqlite3.connect(..., check_same_thread=False)` + `threading.Lock()` 包住每次操作。
+7. **并发时 profile 必须队列发放，不能按下标取模**
+   Chrome 会锁 `user-data-dir`，两个线程共用一个目录必有一个
+   `TargetClosedError`。11 站 3 槽时 `idx % 3` 会让多线程撞同一目录。
+   改成 `queue.Queue` 发放 + 用完归还。`test_each_concurrent_worker_gets_a_distinct_profile`
+   已锁住（临时改回取模会失败）。
 
 ---
 
@@ -141,14 +153,19 @@ python app.py
 
 ## 六、已知限制
 
-1. **健康巡检没有定时器**。`finder/health.py` 状态机（ok / ok_no_hits / degraded /
-   cloudflare_block / needs_login / unreachable）已完成并测试，但没人调它。
-   「定期检查网站可用性」这一条需求**尚未真正落地**。
-2. **Store 已实现但未接线**。`finder/store.py` 有 SQLite 缓存与健康历史，pipeline 没在用。
-3. **串行 pipeline**。`/api/search` 逐站串行跑，21 站全跑一遍要几分钟。
+1. **健康巡检没有定时器**（用户 m02579 明确说不需要）。`finder/health.py` 状态机
+   （ok / ok_no_hits / degraded / cloudflare_block / needs_login / unreachable）已完成并测试，
+   但没有后台任务调它，也没有 UI 面板。
+2. **并发不是无上限的**。`search.workers` 默认 3，每个 worker 一份 Chrome profile
+   （`chrome-profile-w<N>`，播种登录态约 0.02s）。调高会吃内存，且站点本身有限流。
+3. **缓存命中失败也会缓存 30 分钟**。站点刚恢复时最多要等 30 分钟（或点「强制刷新」）。
+   这是刻意取舍：不缓存的话 6 个失败站会让重复搜索慢回首次水平。
 4. **整站串行清扫会卡死**，必须每站一个子进程 + 硬超时（`sweep_driver.py` 这么做）。
    没有单站超时的串行扫描不可用（实测 22 站跑了 50 分钟、CPU 仅 0.84s）。
-5. **不要并发跑多个冒烟测试**——争用同一个 Chrome profile 会互相干扰导致假失败。
+5. **串行跑完立刻并发会假失败**：残留 Chrome 进程会让并发整批 0 成功（0.4s 全灭）。
+   跑基准前必须清掉本项目的 chrome 进程。这是环境问题，不是应用缺陷。
+6. **profile 是独占资源**，同一目录不能并发（Chrome 锁 user-data-dir），
+   所以并发靠「每 worker 一份目录 + 队列发放」，不是共享。
 
 ---
 
@@ -183,22 +200,29 @@ finder/sites.py             load_sites / filter_sites_by_lang
 finder/browser.py           BrowserSession（专用 profile + 真 UA + 显式代理）
 finder/search.py            build_search_url / parse_result_links / pick_best / strip_chrome
 finder/detail.py            extract_card / extract_downloads / decode_gb_dl_links
-finder/pipeline.py          search_one（url/form/index 三模式）/ _follow_detail_gate / run
-finder/health.py            classify / check_site
-finder/store.py             SQLite 缓存 + 健康历史（未接线）
-finder/web/server.py        FastAPI + SSE
+finder/pipeline.py          search_one（url/form/index 三模式）/ _follow_detail_gate
+                            run（缓存 + 并发）/ normalize_query / resolve_worker_primary
+finder/health.py            classify / check_site（状态机就绪，无定时器）
+finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
+finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
 finder/web/static/index.html  单页 UI
-tests/                      180 个离线测试 + fixtures
+tests/                      209 个离线测试 + fixtures
 ```
 
 ---
 
 ## 九、下一步建议（按价值排序）
 
-1. **接上健康巡检定时器** —— 这是用户原始需求里明确的一条，目前完全没落地。
-   把 `health.check_site` 挂到后台任务（如每小时），结果写 `store.health_history`，
-   UI 加一个站点状态面板。
-2. **把 Store 接线到 pipeline** —— 缓存能显著减少重复搜索的等待时间。
-3. **并发化** 21 站串行搜索（按语种过滤后通常 11–17 站，仍是串行）。
-4. **查 ggbases** 三语全部 WRONG_GAME 的原因。
-5. **kungal** 的 resource 页需要点标签页才渲染，目前 `NO_DOWNLOADS`。
+1. **查 ggbases** 三语全部 WRONG_GAME 的原因。
+2. **kungal** 的 resource 页需要点标签页才渲染，目前 `NO_DOWNLOADS`。
+3. **接上健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，
+   所以**不做**。`health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
+
+### 本轮已完成（原建议 2、3）
+
+- **Store 缓存接线**：`pipeline.run(..., store=...)`，缓存键 = `(归一化截断后查询词, site_id)`。
+  成功结果 12h，失败结果 30min（`fail_ttl_minutes`），`refresh=true` 绕过。
+  实测重复搜索 53.9s → **0.5s**，`cached=11/11`。
+- **并发化**：`config.yaml` 的 `search.workers`（默认 3），每 worker 一份独立
+  `chrome-profile-w<N>`，从主 profile 播种登录态（0.02s，只拷 cookies 等小文件）。
+  实测 93.1s → **44.1s（2.1x）**，出下载的站与串行完全一致。

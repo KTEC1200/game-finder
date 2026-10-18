@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,13 +38,33 @@ def _now() -> datetime:
 
 
 class Store:
-    """search_cache（带 TTL）+ health_history 的薄封装，可作上下文管理器。"""
+    """search_cache（带 TTL）+ health_history 的薄封装，可作上下文管理器。
 
-    def __init__(self, db_path: Path | str, ttl_hours: int = 12):
+    线程安全：sqlite3 默认禁止跨线程使用连接（`check_same_thread=True`），
+    而 pipeline 的并发路径会在 worker 线程里读写缓存 —— 实测直接抛
+    `ProgrammingError: SQLite objects created in a thread can only be used in
+    that same thread`，且该异常会被单站兜底逻辑吞成 error 字段，表现为
+    「并发整批 0 成功、0.5s 就结束」，极难定位。
+
+    所以这里 `check_same_thread=False` 并给每次操作加锁：本模块的访问模式是
+    极短的 KV 读写，串行化开销可以忽略，换来跨线程可用。
+    """
+
+    def __init__(
+        self,
+        db_path: Path | str,
+        ttl_hours: int = 12,
+        fail_ttl_minutes: int = 30,
+    ):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ttl = timedelta(hours=ttl_hours)
-        self._con = sqlite3.connect(str(self.path))
+        # 失败结果用更短的 TTL：不缓存会让重复搜索几乎和首次一样慢（实测
+        # 11 站里 6 个是失败站，占掉约 28s）；缓存 12h 又会让站点临时抽风时
+        # 用户半天没法重试。30 分钟是折中，且前端可「强制刷新」绕开。
+        self.fail_ttl = timedelta(minutes=fail_ttl_minutes)
+        self._lock = threading.Lock()
+        self._con = sqlite3.connect(str(self.path), check_same_thread=False)
         self._con.executescript(SCHEMA)
         self._con.commit()
 
@@ -57,19 +78,22 @@ class Store:
         self._con.close()
 
     def put_cached(self, query_norm: str, detail: GameDetail) -> None:
-        self._con.execute(
-            "INSERT OR REPLACE INTO search_cache VALUES (?,?,?,?)",
-            (query_norm, detail.site_id,
-             json.dumps(asdict(detail), ensure_ascii=False),
-             _now().isoformat()),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO search_cache VALUES (?,?,?,?)",
+                (query_norm, detail.site_id,
+                 json.dumps(asdict(detail), ensure_ascii=False),
+                 _now().isoformat()),
+            )
+            self._con.commit()
 
     def get_cached(self, query_norm: str, site_id: str) -> GameDetail | None:
-        row = self._con.execute(
-            "SELECT payload, created_at FROM search_cache WHERE query_norm=? AND site_id=?",
-            (query_norm, site_id),
-        ).fetchone()
+        with self._lock:
+            row = self._con.execute(
+                "SELECT payload, created_at FROM search_cache "
+                "WHERE query_norm=? AND site_id=?",
+                (query_norm, site_id),
+            ).fetchone()
         if not row:
             return None
         payload, created = row
@@ -81,8 +105,10 @@ class Store:
         if created_dt.tzinfo is None:
             # 兼容旧数据：无时区按 UTC 解释
             created_dt = created_dt.replace(tzinfo=timezone.utc)
-        # 严格大于：ttl_hours=0 时任何正的时间流逝都算过期
-        if _now() - created_dt > self.ttl:
+        # 失败结果按 fail_ttl 过期（更短），成功结果按 ttl。
+        # 严格大于：ttl_hours=0 时任何正的时间流逝都算过期。
+        ttl = self.fail_ttl if data.get("error") else self.ttl
+        if _now() - created_dt > ttl:
             return None
         try:
             data["downloads"] = [
@@ -94,20 +120,22 @@ class Store:
             return None
 
     def record_health(self, rec: HealthRecord) -> None:
-        self._con.execute(
-            "INSERT INTO health_history VALUES (?,?,?,?,?)",
-            (rec.site_id, rec.status, rec.latency_ms, rec.reason, rec.checked_at),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO health_history VALUES (?,?,?,?,?)",
+                (rec.site_id, rec.status, rec.latency_ms, rec.reason, rec.checked_at),
+            )
+            self._con.commit()
 
     def health_latest(self) -> dict[str, HealthRecord]:
         # ORDER BY checked_at DESC + rowid DESC 兜住同一时间戳：后插入者胜，
         # 再用 dict 覆盖保证每站只留一条（自连接 MAX 遇并列会出重复行）。
-        rows = self._con.execute(
-            """SELECT site_id, status, latency_ms, reason, checked_at
-               FROM health_history
-               ORDER BY checked_at DESC, rowid DESC"""
-        ).fetchall()
+        with self._lock:
+            rows = self._con.execute(
+                """SELECT site_id, status, latency_ms, reason, checked_at
+                   FROM health_history
+                   ORDER BY checked_at DESC, rowid DESC"""
+            ).fetchall()
         latest: dict[str, HealthRecord] = {}
         for site_id, status, latency_ms, reason, checked_at in rows:
             latest.setdefault(

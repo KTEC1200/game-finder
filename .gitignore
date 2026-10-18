@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 data/
 chrome-profile/
+chrome-profile-w*/
 tools/_gf_*/
 tools/probe_*.json
 tools/_*.txt

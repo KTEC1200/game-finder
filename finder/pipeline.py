@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
+import queue
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -770,46 +772,187 @@ def _follow_detail_gate(
     return card
 
 
+def normalize_query(query: str | None) -> str:
+    """缓存键归一：去首尾空白 + 连续空白压成一个 + 转小写。
+
+    不做去标点/全半角归一：那会让「终焉之莉莉」和「终焉之莉莉！」共用缓存，
+    而站点对这两者的检索结果确实可能不同，属于过度合并。
+    """
+    text = (query or "").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def _run_one_site(
+    config: dict,
+    root: Path,
+    site: Site,
+    query: str,
+    timeout: int,
+    store,
+    cache_on: bool,
+    profile_override: Path | None,
+) -> GameDetail:
+    """单站的完整流程（含缓存读写）。供串行与并发两条路径共用。
+
+    profile_override 为 None 时用主 profile（串行路径）；并发时每个 worker
+    传自己的目录 —— Chrome 会锁住 user-data-dir，共享目录会有一个失败。
+    """
+    from .browser import BrowserSession
+
+    clamped, _ = clamp_query(site, query)
+    key = normalize_query(clamped)
+    if cache_on:
+        hit = store.get_cached(key, site.id)
+        if hit is not None:
+            hit.extra = dict(hit.extra or {})
+            hit.extra["cached"] = True
+            return hit
+
+    page = None
+    with BrowserSession.for_site(config, root, site,
+                                 profile_override=profile_override) as sess:
+        try:
+            page = sess.new_page()
+            card = search_one(page, site, query, timeout_ms=timeout)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    if cache_on:
+        # 失败也写缓存，但 Store 对带 error 的条目用更短的 fail_ttl 过期
+        # （默认 30 分钟）——否则重复搜索会被失败站拖慢到和首次一样。
+        store.put_cached(key, card)
+    return card
+
+
 def run(
     config: dict,
     sites: list[Site],
     query: str,
     project_root: Path,
+    store=None,
+    use_cache: bool = True,
+    workers: int | None = None,
 ) -> list[GameDetail]:
-    """对一组站点串行跑（同站串行、跨站并行留给 server 层做）。
+    """对一组站点跑搜索。返回顺序**始终**与传入 sites 一致。
 
-    按 site.force_headful 分组：普通站共用一个 headless 会话，需要人工过盾的站
-    共用一个 headful 会话。这样 force_headful 真正生效，又不用每站重启浏览器。
-    返回顺序与传入 sites 一致。
+    workers（并发度）：
+      - None / 1 → 串行，用主 profile（chrome-profile），行为与旧版一致
+      - >1     → 线程池并发，每个 worker 一份独立 profile（chrome-profile-w<N>），
+                 启动前从主 profile 播种登录态（实测 0.02s）
+
+    为什么并发必须换 profile：Chrome 会锁住 user-data-dir，实测同一目录并发
+    2 个 persistent context 只有 1 个能起来（另一个 TargetClosedError）；
+    独立目录 3 个并发全部成功、总耗时 5.3s。
+
+    force_headful 的站永远走串行 headful 会话：它们的用途是让人工过盾，
+    并发起来反而互相抢窗口。
+
+    缓存：键是 (归一后的**实际查询词**, site_id)，实际词 = clamp_query 之后的值；
+    只缓存成功结果（error is None）——失败被缓存 12 小时等于剥夺用户重试机会。
     """
-    from .browser import BrowserSession
+    from .browser import BrowserSession, seed_worker_profile, worker_profile_dir
 
     root = Path(project_root)
-    timeout = int((config.get("search") or {}).get("timeout_ms") or SEARCH_TIMEOUT)
+    search_cfg = config.get("search") or {}
+    timeout = int(search_cfg.get("timeout_ms") or SEARCH_TIMEOUT)
+    cache_on = store is not None and use_cache
+
+    n_workers = int(workers if workers is not None
+                    else (search_cfg.get("workers") or 1))
+    n_workers = max(1, min(n_workers, max(1, len(sites))))
+
+    headless_idx = [i for i, s in enumerate(sites) if not s.force_headful]
+    headful_idx = [i for i, s in enumerate(sites) if s.force_headful]
     results: dict[int, GameDetail] = {}
 
-    groups: dict[bool, list[tuple[int, Site]]] = {}
-    for idx, site in enumerate(sites):
-        groups.setdefault(bool(site.force_headful), []).append((idx, site))
+    def _safe(idx: int, profile: Path | None) -> None:
+        site = sites[idx]
+        try:
+            results[idx] = _run_one_site(
+                config, root, site, query, timeout, store, cache_on, profile
+            )
+        except Exception as exc:  # noqa: BLE001
+            results[idx] = GameDetail(
+                site_id=site.id, url=site.homepage, title="",
+                error=f"{type(exc).__name__}: {str(exc)[:150]}",
+            )
 
-    for headful in (False, True):
-        batch = groups.get(headful) or []
-        if not batch:
-            continue
-        # for_site 只读 site.force_headful，用组里任意一站代表整组
-        representative = batch[0][1]
-        with BrowserSession.for_site(config, root, representative) as sess:
-            for idx, site in batch:
+    # ---- 串行路径（workers=1，行为与旧版一致）----
+    if n_workers == 1:
+        for idx in headless_idx:
+            _safe(idx, None)
+        if headful_idx:
+            with BrowserSession.for_site(config, root, sites[headful_idx[0]]) as sess:
+                for idx in headful_idx:
+                    page = None
+                    try:
+                        page = sess.new_page()
+                        results[idx] = search_one(
+                            page, sites[idx], query, timeout_ms=timeout
+                        )
+                        if cache_on:
+                            clamped, _ = clamp_query(sites[idx], query)
+                            store.put_cached(normalize_query(clamped), results[idx])
+                    except Exception as exc:  # noqa: BLE001
+                        results[idx] = GameDetail(
+                            site_id=sites[idx].id, url=sites[idx].homepage,
+                            title="", error=f"{type(exc).__name__}: {str(exc)[:150]}",
+                        )
+                    finally:
+                        if page is not None:
+                            try:
+                                page.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+        return [results[i] for i in range(len(sites))]
+
+    # ---- 并发路径：每个 worker 一份独立 profile ----
+    primary = resolve_worker_primary(config, root)
+    profiles: list[Path] = []
+    for w in range(n_workers):
+        p = worker_profile_dir(root, w)
+        seed_worker_profile(primary, p)
+        profiles.append(p)
+
+    # profile 是**独占资源**：Chrome 会锁住 user-data-dir，两个线程同时用一个
+    # 目录必有一个 TargetClosedError（实测）。所以用队列发放，用完归还——
+    # 而不是按下标取模（那样 11 站 3 槽会出现多线程共用同一目录）。
+    available: queue.Queue[Path] = queue.Queue()
+    for p in profiles:
+        available.put(p)
+
+    def _task(idx: int) -> None:
+        profile = available.get()
+        try:
+            _safe(idx, profile)
+        finally:
+            available.put(profile)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_task, idx) for idx in headless_idx]
+        for fut in as_completed(futures):
+            fut.result()  # _safe 已兜住异常；这里只等完成
+
+    # headful 组始终串行（人工过盾场景，并发没意义还会抢窗口）
+    if headful_idx:
+        with BrowserSession.for_site(config, root, sites[headful_idx[0]]) as sess:
+            for idx in headful_idx:
                 page = None
                 try:
                     page = sess.new_page()
-                    results[idx] = search_one(page, site, query, timeout_ms=timeout)
+                    results[idx] = search_one(
+                        page, sites[idx], query, timeout_ms=timeout
+                    )
+                    if cache_on:
+                        clamped, _ = clamp_query(sites[idx], query)
+                        store.put_cached(normalize_query(clamped), results[idx])
                 except Exception as exc:  # noqa: BLE001
                     results[idx] = GameDetail(
-                        site_id=site.id,
-                        url=site.homepage,
-                        title="",
-                        error=f"{type(exc).__name__}: {str(exc)[:150]}",
+                        site_id=sites[idx].id, url=sites[idx].homepage,
+                        title="", error=f"{type(exc).__name__}: {str(exc)[:150]}",
                     )
                 finally:
                     if page is not None:
@@ -819,3 +962,11 @@ def run(
                             pass
 
     return [results[i] for i in range(len(sites))]
+
+
+def resolve_worker_primary(config: dict, root: Path) -> Path:
+    """并发 worker 播种的源目录 = 配置里的主 profile。"""
+    from .browser import resolve_profile_dir
+
+    b = config.get("browser") or {}
+    return resolve_profile_dir(root, b.get("profile_dir", "chrome-profile"))

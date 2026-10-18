@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -186,6 +187,65 @@ def resolve_profile_dir(project_root: Path, configured: str) -> Path:
     return p
 
 
+# ---- 并发 worker 的 profile ----------------------------------------------
+# 实测（2026-10-18，probe_concurrent_profile.py / probe_concurrent_sep.py）：
+#   同一 profile 目录并发启动 2 个 persistent context → 只有 1 个成功，
+#   另一个 TargetClosedError（Chrome 锁住 user-data-dir）。
+#   独立目录并发 3 个 → 3/3 成功，总耗时 5.3s。
+# 所以并发只能靠「每个 worker 一份自己的 profile」。
+
+# 播种清单：只拷登录态/偏好这类小文件（实测全部加起来 ~500KB），
+# 绝不碰 Cache / GPUCache / Code Cache（那是 320MB 里的大头，且没用）。
+SEED_ENTRIES = (
+    "Local State",
+    "Default/Preferences",
+    "Default/Secure Preferences",
+    "Default/Login Data",
+    "Default/Web Data",
+    "Default/Network/Cookies",
+    "Default/Network/Cookies-journal",
+    "Default/Network/Network Persistent State",
+    "Default/Network/TransportSecurity",
+    "Default/Local Storage",
+    "Default/Session Storage",
+)
+
+
+def worker_profile_dir(project_root: Path, index: int) -> Path:
+    """第 index 个 worker 的 profile 目录：<project>/chrome-profile-w<N>。"""
+    return Path(project_root) / f"chrome-profile-w{index}"
+
+
+def seed_worker_profile(primary: Path | str, worker: Path | str) -> None:
+    """把主 profile 的登录态播种到 worker 目录（可重复调用）。
+
+    每次都先清空 worker 目录：残留的 LOCK / Singleton* 会让 Chrome 认为
+    目录仍被占用，启动直接失败。主 profile 不存在（首次运行）时建个空目录即可。
+    """
+    primary = Path(primary)
+    worker = Path(worker)
+    shutil.rmtree(worker, ignore_errors=True)
+    worker.mkdir(parents=True, exist_ok=True)
+
+    if not primary.exists():
+        return
+
+    for rel in SEED_ENTRIES:
+        src = primary / rel
+        if not src.exists():
+            continue
+        dst = worker / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+        except OSError:
+            # 单个文件被占用/损坏不该毁掉整个 worker
+            continue
+
+
 class BrowserSession:
     """包装 launch_persistent_context，统一注入 UA / 代理 / 反检测参数。"""
 
@@ -194,10 +254,12 @@ class BrowserSession:
         config: dict[str, Any],
         project_root: Path,
         headful_override: bool = False,
+        profile_override: Path | str | None = None,
     ):
         self._cfg = config
         self._root = Path(project_root)
         self._headful_override = headful_override
+        self._profile_override = profile_override
         self._pw = None
         self._ctx = None
         self._closed = False
@@ -208,10 +270,15 @@ class BrowserSession:
 
     @classmethod
     def for_site(
-        cls, config: dict[str, Any], project_root: Path, site: Site
+        cls, config: dict[str, Any], project_root: Path, site: Site,
+        profile_override: Path | str | None = None,
     ) -> "BrowserSession":
         """按站点降级：site.force_headful 为 True 时用 headful。"""
-        return cls(config, project_root, headful_override=bool(site.force_headful))
+        return cls(
+            config, project_root,
+            headful_override=bool(site.force_headful),
+            profile_override=profile_override,
+        )
 
     def __enter__(self) -> "BrowserSession":
         b = self._cfg.get("browser") or {}
@@ -219,7 +286,16 @@ class BrowserSession:
         if not Path(chrome_path).exists():
             raise FileNotFoundError(f"chrome not found: {chrome_path}")
 
-        profile = resolve_profile_dir(self._root, b.get("profile_dir", "chrome-profile"))
+        if self._profile_override is not None:
+            profile = Path(self._profile_override)
+            if is_chrome_default_profile(profile):
+                raise ValueError(
+                    f"profile_override must not be Chrome's default: {profile}"
+                )
+        else:
+            profile = resolve_profile_dir(
+                self._root, b.get("profile_dir", "chrome-profile")
+            )
         profile.mkdir(parents=True, exist_ok=True)
 
         ua = b.get("user_agent") or build_user_agent(read_chrome_version(chrome_path))

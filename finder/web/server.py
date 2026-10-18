@@ -19,10 +19,22 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
 
 
-def _run_pipeline(config: dict, sites: list[Site], query: str, root: Path) -> list[GameDetail]:
-    """真实现。测试里会被 monkeypatch 掉，避免起浏览器。"""
+def _run_pipeline(
+    config: dict, sites: list[Site], query: str, root: Path,
+    use_cache: bool = True,
+) -> list[GameDetail]:
+    """真实现。测试里会被 monkeypatch 掉，避免起浏览器。
+
+    这里负责 Store 的生命周期：sqlite 连接不能跨线程共享，所以每次搜索
+    新开一个（打开 + 建表都是毫秒级，不值得为它引入连接池）。
+    """
     from ..pipeline import run
-    return run(config, sites, query, root)
+    from ..store import Store
+
+    db = root / "data" / "finder.db"
+    ttl = int((config.get("cache") or {}).get("ttl_hours") or 12)
+    with Store(db, ttl) as st:
+        return run(config, sites, query, root, store=st, use_cache=use_cache)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -46,6 +58,8 @@ def create_app() -> FastAPI:
     @app.post("/api/search")
     def search(body: dict):
         query = (body.get("query") or "").strip()
+        # 前端「强制刷新」按钮用：绕过缓存重新抓一遍
+        use_cache = not bool(body.get("refresh"))
         lang = detect_lang(query)
         part, skipped = filter_sites_by_lang(all_sites, lang)
 
@@ -53,11 +67,12 @@ def create_app() -> FastAPI:
             yield _sse("start", {
                 "query": query, "lang": lang,
                 "participating": len(part),
+                "use_cache": use_cache,
                 "skipped": [{"id": s.id, "name": s.name,
                              "reason": "LANG_MISMATCH"} for s in skipped],
             })
             try:
-                results = _run_pipeline(CONFIG, part, query, ROOT)
+                results = _run_pipeline(CONFIG, part, query, ROOT, use_cache)
             except Exception as exc:  # noqa: BLE001
                 yield _sse("error", {"message": f"{type(exc).__name__}: {str(exc)[:200]}"})
                 yield _sse("done", {"ok": 0, "total": len(part)})

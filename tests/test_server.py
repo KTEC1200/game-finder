@@ -9,7 +9,7 @@ def client(monkeypatch):
     from finder.web import server as srv
     monkeypatch.setattr(
         srv, "_run_pipeline",
-        lambda config, sites, query, root: [
+        lambda config, sites, query, root, use_cache=True: [
             __import__("finder.models", fromlist=["GameDetail"]).GameDetail(
                 site_id=sites[0].id, url="https://e.com/1", title="fake") if sites else
             __import__("finder.models", fromlist=["GameDetail"]).GameDetail(
