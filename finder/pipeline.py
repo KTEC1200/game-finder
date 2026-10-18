@@ -104,6 +104,9 @@ NO_RESULTS_MARKERS = (
     "no results for",
     "无相关搜索",
     "無相關搜索",
+    #   ankergames → "No games found / Try different filters or browse the full
+    #   catalogue."（2026-10-18 实测：查日文游戏名时该站英文库确实 0 条）
+    "no games found",
 )
 
 
@@ -1426,8 +1429,10 @@ def run(
     force_headful 的站永远走串行 headful 会话：它们的用途是让人工过盾，
     并发起来反而互相抢窗口。
 
-    缓存：键是 (归一后的**实际查询词**, site_id)，实际词 = clamp_query 之后的值；
-    只缓存成功结果（error is None）——失败被缓存 12 小时等于剥夺用户重试机会。
+    缓存：键是 (归一后的**实际查询词**, site_id)，实际词 = clamp_query 之后的值。
+    成功结果缓存 12h；**失败结果缓存 30 分钟**（Store 的 fail_ttl）——
+    完全不复用失败会让 6 个坏站每次都把整批拖慢一倍（实测 cold 53.9s→warm 0.5s），
+    缓存太久又剥夺用户重试机会。用户可用 UI 的「强制刷新」绕过。
     """
     from .browser import BrowserSession, seed_worker_profile, worker_profile_dir
 
