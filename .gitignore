@@ -3,6 +3,7 @@ __pycache__/
 data/
 chrome-profile/
 chrome-profile-w*/
+chrome-profile-sweep*/
 tools/_gf_*/
 tools/probe_*.json
 tools/_*.txt

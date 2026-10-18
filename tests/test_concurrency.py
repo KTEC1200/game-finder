@@ -243,3 +243,48 @@ def test_run_keeps_headful_sites_out_of_headless_workers(monkeypatch, tmp_path):
     out = pipeline.run({}, sites, "q", tmp_path, workers=2)
 
     assert [d.site_id for d in out] == ["a", "hf", "b"]
+
+
+# ---- 显式 profile：让同机多个进程互不抢目录 ----
+
+def test_run_with_explicit_profile_forces_serial(monkeypatch, tmp_path):
+    """显式 profile 时必须串行——那个目录只允许一个 Chrome 进程。
+
+    真实缺陷（2026-10-18 真站实测）：清扫脚本给每个子进程指定独立 profile，
+    但 1 个站的 run() 会把 n_workers 夹到 1 后给 _safe 传 None，于是所有
+    子进程都去开主 profile → 全部 TargetClosedError，表现为整批假失败。
+    """
+    monkeypatch.setattr("finder.browser.BrowserSession", _RecordingSession)
+    _RecordingSession.used = []
+
+    def fake(page, site, query, timeout_ms=45000):
+        return GameDetail(site_id=site.id, url="u", title="t")
+
+    monkeypatch.setattr(pipeline, "search_one", fake)
+    sites = [_site(x) for x in ("a", "b", "c")]
+    pinned = tmp_path / "chrome-profile-sweep0"
+
+    pipeline.run({}, sites, "q", tmp_path, workers=3, profile=pinned)
+
+    assert _RecordingSession.used == [str(pinned)] * 3, (
+        f"每站都该用指定 profile，实际 {_RecordingSession.used}"
+    )
+
+
+def test_run_with_explicit_profile_seeds_nothing(monkeypatch, tmp_path):
+    """指定 profile 时不该再去建 worker 槽位（否则白拷一份登录态）。"""
+    monkeypatch.setattr("finder.browser.BrowserSession", _RecordingSession)
+    _RecordingSession.used = []
+    calls: list = []
+    monkeypatch.setattr("finder.browser.seed_worker_profile",
+                        lambda *a, **k: calls.append(a))
+
+    def fake(page, site, query, timeout_ms=45000):
+        return GameDetail(site_id=site.id, url="u", title="t")
+
+    monkeypatch.setattr(pipeline, "search_one", fake)
+    pipeline.run({}, [_site("a")], "q", tmp_path, workers=3,
+                 profile=tmp_path / "pinned")
+
+    assert calls == [], f"指定 profile 时不该播种 worker，实际 {calls}"
+

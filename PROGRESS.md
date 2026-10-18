@@ -199,6 +199,15 @@ python app.py
     子串匹配直接失败。`_norm` 增加装饰符号清理；CJK 查询额外允许「去空格后」
     再匹配一次（拉丁短查询不启用，否则 `AI` 会命中 `Chained`）。
 
+20. **登录墙被报成「没有结果」**（galgame.dev）
+    搜索 URL `302` 到 `/login`，页面上只剩导航链接，被解析成 6 条 0.5 分候选；
+    `pick_best` 返回 None，旧代码据此报 `NO_RESULTS: pick_best returned None`。
+    用户会以为站上没有这款游戏，实际是**这个站的搜索要登录**。
+    修法：新增 `looks_login_wall(url)`，**只认落地 URL 的路径**
+    （`/login` `/signin` `/auth` `/account/login`），不扫正文 —— 导航里到处
+    都有「登录」字样，扫 HTML 会把每个带登录入口的搜索页都误判成墙。
+    优先级：拦截 > 登录墙 > 明确无结果。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -218,7 +227,10 @@ python app.py
 - **ggbases**：`search.so?p=0&title={q}`；结果行是**嵌套锚点**（内层 title= 是
   上传者名）；详情 `view.so?id=N`；磁力要 goto `magnet.so?id=N` 再页面内 fetch 取 hash。
   空结果是 `0 個資源`（NBSP）。`kinds: [磁力, 直链]` 两种都服务。
-- **ggbases**：三语查询全部 `WRONG_GAME`，搜索结果标题与查询词无证据 → 适配器待查。
+- **galgame.dev**：`search?term={q}&in=titles` **会 302 到 `/login`** —— 
+  站内搜索要登录（sites.yaml 标了 `needs_login: true`）。管线现在认这个跳转，
+  报 `NEEDS_LOGIN: 该站搜索需要先登录（搜索页被重定向到登录页）`，
+  而不是误导性的 `NO_RESULTS`。
 - **nysoure / lzacg**：Cloudflare 拦截（`cf-error-details` / `attention required`），
   属代理出口 IP 被拒，不是代码问题。
 

@@ -890,17 +890,22 @@ def _extract_detail(
             return followed
         card.extra.update(extra)
         if not card.downloads:
-            # gamer520 实测：详情页本身不含网盘链接，只有一个 /go?post_id=<id> 跳板。
-            # 不自动跟进：实测该跳板会把 post 带到 520.gamers520.com/<n>.html，
-            # 而落地页标题与 post 对不上（可能按登录态/推荐位分流），
-            # 自动跟进有把「别的游戏」的网盘链接挂到本结果上的风险。只记录证据。
-            card.extra["gate_links"] = _find_gate_links(detail_html, detail_url)
-            card.error = _classify_empty_detail(detail_html)
+            # gamer520 实测（2026-10-18，两次跟随结果逐字节一致）：详情页本身不含
+            # 网盘链接，只有一个 /go?post_id=<id> 跳板。**不自动跟进** ——
+            # 落地页 `520.gamers520.com/8191.html` 是第三方聚合站的用户上传帖
+            # （面包屑 `… > 322369521 > 5009 牛夫人`，2024-06-04），正文 716 字里
+            # 游戏名出现 0 次、`_query_evidence`=0；其百度盘链接还出现在**另一个
+            # 帖子**（123857）的落地页上 → 落地页与本游戏无归属关系。
+            # 自动跟进会把无法归属的链接挂到用户查的游戏上，所以只记录证据，
+            # 并把「有跳板但没直链」单独报出来，不让用户以为是站点没有资源。
+            gates = _find_gate_links(detail_html, detail_url)
+            card.extra["gate_links"] = gates
+            card.error = _classify_empty_detail(detail_html, gates)
     return card
 
 
-# 「没抽到下载链接」的三种真实原因，必须分开报 —— 都写 NO_DOWNLOADS 会让
-# 「需要登录/需要评论」「站点自己说已下架」和「适配器坏了」混成一团。
+# 「没抽到下载链接」的四种真实原因，必须分开报 —— 都写 NO_DOWNLOADS 会让
+# 「需要登录/需要评论」「只有无法归属的跳板」和「适配器坏了」混成一团。
 #
 # iacg 实测（2026-10-18，`https://iacg.love/56681.html`）：正文里有
 #   「此处内容已隐藏，请评论后刷新页面查看.」
@@ -936,7 +941,7 @@ GATED_CLOSED_MARKERS = (
 )
 
 
-def _classify_empty_detail(html: str) -> str:
+def _classify_empty_detail(html: str, gate_links=()) -> str:
     """详情页抽不到下载时，给出具体原因而不是一律 NO_DOWNLOADS。"""
     blob = _SPACEY_RE.sub(" ", _visible_text(html or "")).lower()
     if any(m in blob for m in GATED_COMMENT_MARKERS):
@@ -947,6 +952,11 @@ def _classify_empty_detail(html: str) -> str:
         return "NEEDS_LOGIN: 页面要求登录后才显示下载"
     if any(m in blob for m in GATED_CLOSED_MARKERS):
         return "NO_DOWNLOADS: 站点自己标注内容不可用"
+    if gate_links:
+        # 页面有站内跳板但没直链。跳板落地页可能是第三方聚合站的通用页，
+        # 与本次查询的游戏无归属关系，所以不自动跟进（见 card.extra["gate_links"]）。
+        return (f"NEEDS_GATE: 详情页只有 {len(gate_links)} 条站内跳板链接、没有直链；"
+                "跳板落地页无法确认属于本游戏，未自动跟进")
     return "NO_DOWNLOADS"
 
 
@@ -1448,6 +1458,7 @@ def run(
     store=None,
     use_cache: bool = True,
     workers: int | None = None,
+    profile: Path | str | None = None,
 ) -> list[GameDetail]:
     """对一组站点跑搜索。返回顺序**始终**与传入 sites 一致。
 
@@ -1467,6 +1478,10 @@ def run(
     成功结果缓存 12h；**失败结果缓存 30 分钟**（Store 的 fail_ttl）——
     完全不复用失败会让 6 个坏站每次都把整批拖慢一倍（实测 cold 53.9s→warm 0.5s），
     缓存太久又剥夺用户重试机会。用户可用 UI 的「强制刷新」绕过。
+
+    profile：显式指定用哪个 Chrome profile 目录，并因此**强制串行**。
+    用途是让同一台机器上多个 run() 进程互不抢同一个 user-data-dir
+    （Chrome 会锁目录，抢到的那个会 TargetClosedError）。清扫脚本靠它并行。
     """
     from .browser import BrowserSession, seed_worker_profile, worker_profile_dir
 
@@ -1477,6 +1492,9 @@ def run(
 
     n_workers = int(workers if workers is not None
                     else (search_cfg.get("workers") or 1))
+    if profile is not None:
+        # 显式 profile 时不能并发：那个目录只允许一个 Chrome 进程。
+        n_workers = 1
     n_workers = max(1, min(n_workers, max(1, len(sites))))
 
     headless_idx = [i for i, s in enumerate(sites) if not s.force_headful]
@@ -1495,12 +1513,14 @@ def run(
                 error=f"{type(exc).__name__}: {str(exc)[:150]}",
             )
 
-    # ---- 串行路径（workers=1，行为与旧版一致）----
+    # ---- 串行路径（workers=1，行为与旧版一致；显式 profile 也走这里）----
     if n_workers == 1:
         for idx in headless_idx:
-            _safe(idx, None)
+            _safe(idx, profile)
         if headful_idx:
-            with BrowserSession.for_site(config, root, sites[headful_idx[0]]) as sess:
+            with BrowserSession.for_site(
+                config, root, sites[headful_idx[0]], profile_override=profile
+            ) as sess:
                 for idx in headful_idx:
                     page = None
                     try:
