@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import html as html_mod
 import re
 from urllib.parse import unquote, urlparse
@@ -130,6 +131,81 @@ def _classify(url: str) -> str:
     if re.search(r"/(download|dl|down|file)", low):
         return "direct"
     return "unknown"
+
+
+def _bencode_skip(data: bytes, i: int) -> int | None:
+    """从 `i` 开始跳过一个 bencode 值，返回结束位置（不含）。
+
+    只做「跳过」，不建对象 —— 我们唯一需要的是 info 字典的字节边界，
+    然后对它整体算 SHA1。遇到不完整的数据返回 None。
+    """
+    if i >= len(data):
+        return None
+    c = data[i : i + 1]
+    if c == b"i":
+        j = data.find(b"e", i)
+        return None if j < 0 else j + 1
+    if c == b"l" or c == b"d":
+        i += 1
+        while True:
+            if i >= len(data):
+                return None
+            if data[i : i + 1] == b"e":
+                return i + 1
+            nxt = _bencode_skip(data, i)
+            if nxt is None:
+                return None
+            i = nxt
+    if c.isdigit():
+        j = data.find(b":", i)
+        if j < 0:
+            return None
+        try:
+            n = int(data[i:j])
+        except ValueError:
+            return None
+        end = j + 1 + n
+        return end if end <= len(data) else None
+    return None
+
+
+def torrent_info_hash(data: bytes) -> str | None:
+    """算 torrent 的 info hash（info 字典的 SHA1，40 位小写十六进制）。
+
+    byrutgame 实测（2026-10-18）：下载按钮返回 `application/x-bittorrent`，
+    整页 HTML 里没有任何 `magnet:` 文本，磁力链只能由种子本地算出。
+    数据不完整 / 不是 bencode 时返回 None（不猜）。
+    """
+    if not data or data[0:1] != b"d":
+        return None
+    i = 1
+    while True:
+        if i >= len(data):
+            return None
+        if data[i : i + 1] == b"e":
+            return None  # 走到外层结尾也没见到 info
+        # key 必须是字符串
+        kend = _bencode_skip(data, i)
+        if kend is None or not data[i : i + 1].isdigit():
+            return None
+        try:
+            klen = int(data[i : data.find(b":", i)])
+        except ValueError:
+            return None
+        key = data[data.find(b":", i) + 1 : data.find(b":", i) + 1 + klen]
+        vstart = kend
+        vend = _bencode_skip(data, vstart)
+        if vend is None:
+            return None
+        if key == b"info":
+            return hashlib.sha1(data[vstart:vend]).hexdigest()
+        i = vend
+
+
+def build_magnet_from_torrent(data: bytes) -> str | None:
+    """`.torrent` 字节 → 磁力链。算不出 info hash 时返回 None。"""
+    h = torrent_info_hash(data)
+    return f"magnet:?xt=urn:btih:{h}" if h else None
 
 
 def decode_golink(html: str) -> list[str]:

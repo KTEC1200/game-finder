@@ -29,6 +29,9 @@ class SearchSpec:
     # 先点 detail_open_selector 展开，再取匹配 detail_follow_pattern 的链接进去。
     detail_open_selector: str | None = None
     detail_follow_pattern: str | None = None
+    # 详情页里指向 `.torrent` 种子的链接选择器（byrutgame 实测）：
+    # 点它返回 application/x-bittorrent，磁力链由种子的 info hash 本地算出。
+    torrent_selector: str | None = None
 
 
 @dataclass

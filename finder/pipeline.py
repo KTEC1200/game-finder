@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import base64
 import html as html_mod
 import json
 import queue
@@ -31,7 +32,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from .detail import build_magnet_url, extract_card, parse_magnet_ids
+from .detail import (
+    build_magnet_from_torrent,
+    build_magnet_url,
+    extract_card,
+    parse_magnet_ids,
+)
 from .lang import CJK_RE, KANA_RE
 from .models import Download, GameDetail, SearchHit, Site
 from .search import (
@@ -713,6 +719,10 @@ def _extract_detail(
             card.downloads = _fetch_ggbases_magnets(
                 page, detail_html, detail_url, timeout_ms, extra
             )
+        if site.search.torrent_selector:
+            card.downloads = card.downloads + _fetch_torrent_magnets(
+                page, site, timeout_ms, extra
+            )
         followed = _follow_detail_gate(page, site, detail_url, timeout_ms, extra)
         if followed is not None:
             return followed
@@ -798,6 +808,72 @@ def _fetch_ggbases_magnets(
         if url and all(d.url != url for d in out):
             out.append(Download(kind="magnet", url=url))
     return out
+
+
+def _fetch_torrent_magnets(
+    page, site: Site, timeout_ms: int, extra: dict[str, Any]
+) -> list[Download]:
+    """byrutgame：详情页的下载按钮直接返回 `.torrent` 种子。
+
+    实测 2026-10-18：`https://byrutgame.org/index.php?do=download&id=<n>`
+    回 `application/x-bittorrent`（55 KB 种子），整页 HTML 里**没有**任何
+    `magnet:` 文本 —— 磁力链只能由种子的 info hash 本地算出。
+
+    种子必须用**页面内 fetch** 取（数组 → base64 传回来）：
+    `page.request` 走独立 TLS 连接，与 ggbases 那次一样会被拒。取不到就
+    返回空，由上层如实报 NO_DOWNLOADS，不猜 hash。
+    """
+    sel = site.search.torrent_selector or ""
+    if not sel:
+        return []
+    try:
+        href = page.evaluate(
+            """(sel) => {
+                for (const a of document.querySelectorAll(sel)) {
+                    const h = a.href || a.getAttribute('href') || '';
+                    if (h) return h;
+                }
+                return '';
+            }""",
+            sel,
+        )
+    except Exception as exc:  # noqa: BLE001
+        extra.setdefault("torrent_errors", []).append(f"locate: {type(exc).__name__}")
+        return []
+    if not href:
+        extra.setdefault("torrent_errors", []).append("locate: no-match")
+        return []
+    extra["torrent_href"] = href
+    try:
+        b64 = page.evaluate(
+            """async (url) => {
+                const r = await fetch(url, {credentials:'include'});
+                if (!r.ok) return '';
+                const buf = await r.arrayBuffer();
+                let s = '';
+                const bytes = new Uint8Array(buf);
+                for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+                return btoa(s);
+            }""",
+            href,
+        )
+    except Exception as exc:  # noqa: BLE001
+        extra.setdefault("torrent_errors", []).append(f"fetch: {type(exc).__name__}")
+        return []
+    if not b64:
+        extra.setdefault("torrent_errors", []).append("fetch: empty")
+        return []
+    try:
+        data = base64.b64decode(b64)
+    except Exception:  # noqa: BLE001
+        extra.setdefault("torrent_errors", []).append("fetch: bad-base64")
+        return []
+    extra["torrent_bytes"] = len(data)
+    magnet = build_magnet_from_torrent(data)
+    if not magnet:
+        extra.setdefault("torrent_errors", []).append("parse: no-info-hash")
+        return []
+    return [Download(kind="magnet", url=magnet, label="种子")]
 
 
 def _follow_detail_gate(

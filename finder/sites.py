@@ -28,6 +28,7 @@ def load_sites(path: Path | str | None = None) -> list[Site]:
             index_url=s.get("index_url"),
             detail_open_selector=s.get("detail_open_selector"),
             detail_follow_pattern=s.get("detail_follow_pattern"),
+            torrent_selector=s.get("torrent_selector"),
         )
         out.append(
             Site(

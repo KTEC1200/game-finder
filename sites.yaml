@@ -30,6 +30,10 @@ sites:
     search:
       mode: url
       url_template: "https://byrutgame.org/index.php?do=search&subaction=search&search_start=0&full_search=0&story={q}"
+      # 详情页「Скачать .torrent」指向 index.php?do=download&id=<n>，
+      # 返回 application/x-bittorrent；页面本身没有任何 magnet: 文本，
+      # 磁力链由种子的 info hash 本地算出（finder/detail.py: build_magnet_from_torrent）
+      torrent_selector: "a[href*='do=download']"
 
   - id: gamer520
     name: Gamer520
