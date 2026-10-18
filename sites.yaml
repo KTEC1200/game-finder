@@ -153,7 +153,9 @@ sites:
   - id: ggbases
     name: GGBases
     homepage: "https://ggbases.dlgal.com/"
-    kinds: [磁力]
+    # 实测 2026-10-18：磁力（magnet.so 页 + 页面内 fetch 取 hash）
+    # 与 filehost 直链（rapidgator / katfile）都有，所以两种都声明。
+    kinds: [磁力, 直链]
     langs: [en, ja]
     search:
       mode: url

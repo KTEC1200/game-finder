@@ -21,6 +21,8 @@
 """
 from __future__ import annotations
 
+import html as html_mod
+import json
 import queue
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,9 +31,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from .detail import extract_card
+from .detail import build_magnet_url, extract_card, parse_magnet_ids
 from .lang import CJK_RE, KANA_RE
-from .models import GameDetail, SearchHit, Site
+from .models import Download, GameDetail, SearchHit, Site
 from .search import (
     _norm,
     build_search_url,
@@ -43,6 +45,10 @@ from .search import (
 SEARCH_TIMEOUT = 45000
 DETAIL_TIMEOUT = 45000
 SETTLE_MS = 2500
+
+# 排版空白（不间断空格 U+00A0 / 全角空格 U+3000 等）归一成普通空格。
+# ggbases 空结果页输出 `0\xa0個資源`，不做归一化标记永远匹配不上。
+_SPACEY_RE = re.compile(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000\t\r\n]+")
 
 # 被 Cloudflare / 防火墙挡下来的页面特征（小写匹配）
 BLOCK_MARKERS = (
@@ -70,12 +76,15 @@ NO_RESULTS_MARKERS = (
     #   acggw    → "搜索结果 没有内容"
     #   nekogal  → "共找到 0 个文章" + "暂无内容"
     #   galgamex → "暂无游戏收录"
+    #   ggbases  → "0 個資源"（繁体；`enderlilies` / `千恋万花` 实测都是 0 条）
     # 少了这几条就会掉进 "NO_RESULTS: pick_best returned None" 这种含糊报错。
     "搜索结果 没有内容",
     "没有内容",
     "共找到 0 个",
     "暂无内容",
     "暂无游戏收录",
+    "0 個資源",
+    "0 个资源",
 )
 
 
@@ -261,9 +270,14 @@ def _form_search(
 
 
 def _visible_text(html: str) -> str:
-    """粗抽可见文本（去 script/style/标签），用于「无结果」判定。"""
+    """粗抽可见文本（去 script/style/标签），用于「无结果」判定。
+
+    必须先反转义 HTML 实体：真站空结果页输出的是 `0&nbsp;個資源`，
+    不反转义的话拿到的是字面量 `&nbsp;`，后面的空白归一化永远对不上。
+    """
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html or "", flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
+    text = html_mod.unescape(text)
     return re.sub(r"\s+", " ", text)
 
 
@@ -281,8 +295,14 @@ def looks_blocked(title: str, html: str) -> str | None:
 
 
 def looks_no_results(title: str, html: str) -> str | None:
-    """识别站点明确的无结果文案；返回命中的特征，没命中返回 None。"""
+    """识别站点明确的无结果文案；返回命中的特征，没命中返回 None。
+
+    必须先把各类「排版空白」归一成普通空格：ggbases 空结果页实测输出
+    `0\xa0個資源`（不间断空格 U+00A0），标记表里写普通空格永远匹配不上，
+    于是空结果掉进 `pick_best returned None` 的含糊报错。
+    """
     blob = f"{title or ''} {_visible_text(html)}".lower()
+    blob = _SPACEY_RE.sub(" ", blob)
     for marker in NO_RESULTS_MARKERS:
         if marker in blob:
             return marker
@@ -685,6 +705,14 @@ def _extract_detail(
     if not card.downloads:
         # 有些站详情页本身不含网盘链，要先点一个按钮才渲染出资源页链接
         # （touchgal 实测：「下载」按钮点完才出现 /{game}/resource/{id}）。
+        # ggbases 实测：`kinds: [磁力]`，但详情页没有任何 `magnet:` 文本。
+        # 磁力在独立的 magnet.so?id=N 页，hash 由页面 JS POST 拿。
+        # 必须在**页面内 fetch**（复用浏览器网络栈与 cookie）：page.request
+        # 走独立 TLS 连接，实测 ECONNRESET / 30s 超时。
+        if site.id == "ggbases":
+            card.downloads = _fetch_ggbases_magnets(
+                page, detail_html, detail_url, timeout_ms, extra
+            )
         followed = _follow_detail_gate(page, site, detail_url, timeout_ms, extra)
         if followed is not None:
             return followed
@@ -697,6 +725,79 @@ def _extract_detail(
             card.extra["gate_links"] = _find_gate_links(detail_html, detail_url)
             card.error = "NO_DOWNLOADS"
     return card
+
+
+def _fetch_ggbases_magnets(
+    page, detail_html: str, detail_url: str, timeout_ms: int, extra: dict[str, Any]
+) -> list[Download]:
+    """ggbases：详情页没有 `magnet:` 文本，磁力在独立的 magnet.so?id=N 页。
+
+    hash 由那页的 JS 点「復製磁鏈」后 POST 拿到：
+        POST /magnet.so?downid=<uuid>&json=1&id=N  ->  {"hash":"e018ad..."}
+    downid 每次访问都会变，所以必须先把 magnet 页取下来读它。
+
+    必须用**页面内 fetch**：page.request 走独立 TLS 连接，真站实测
+    ECONNRESET 或 30s 超时；页面内 fetch 复用浏览器网络栈与 cookie，稳定 200。
+    取不到就返回空（诚实报 NO_DOWNLOADS，不猜 hash）。
+    """
+    ids = parse_magnet_ids(detail_html, detail_url)
+    extra["gg_magnet_ids"] = ids
+    if not ids:
+        return []
+
+    base = f"{urlparse(detail_url).scheme}://{urlparse(detail_url).netloc}"
+    out: list[Download] = []
+    for mid in ids[:3]:                      # 一页最多跟进 3 个，避免拖慢
+        magnet_page = f"{base}/magnet.so?id={mid}"
+        # 先真的打开磁力页：downid 是在**这一页**渲染时生成的，从详情页
+        # 直接 fetch 拿不到（页面内 fetch 那一步实测抛 Error）。
+        try:
+            status, nav_err = _goto(page, magnet_page, timeout_ms)
+            _settle(page, 1200)
+        except Exception as exc:  # noqa: BLE001
+            extra.setdefault("gg_magnet_errors", []).append(
+                f"goto({mid}): {type(exc).__name__}"
+            )
+            continue
+        if nav_err:
+            extra.setdefault("gg_magnet_errors", []).append(f"goto({mid}): {nav_err}")
+            continue
+        try:
+            html = page.content()
+        except Exception as exc:  # noqa: BLE001
+            extra.setdefault("gg_magnet_errors", []).append(
+                f"content({mid}): {type(exc).__name__}"
+            )
+            continue
+        downids = list(dict.fromkeys(re.findall(r"downid=([0-9a-fA-F\-]{36})", html or "")))
+        if not downids:
+            extra.setdefault("gg_magnet_errors", []).append(f"no-downid({mid})")
+            continue
+        try:
+            body = page.evaluate(
+                """async ([d, i]) => {
+                    const r = await fetch(`/magnet.so?downid=${d}&json=1&id=${i}`, {
+                        method:'POST',
+                        headers:{'X-Requested-With':'XMLHttpRequest'},
+                        credentials:'include'
+                    });
+                    return r.ok ? await r.text() : '';
+                }""",
+                [downids[0], mid],
+            )
+        except Exception as exc:  # noqa: BLE001
+            extra.setdefault("gg_magnet_errors", []).append(
+                f"post({mid}): {type(exc).__name__}"
+            )
+            continue
+        try:
+            h = (json.loads(body or "{}") or {}).get("hash") or ""
+        except Exception:  # noqa: BLE001
+            h = ""
+        url = build_magnet_url(h)
+        if url and all(d.url != url for d in out):
+            out.append(Download(kind="magnet", url=url))
+    return out
 
 
 def _follow_detail_gate(

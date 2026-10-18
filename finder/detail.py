@@ -43,6 +43,10 @@ URL_RE = re.compile(
     r"https?://[^\s\"'<>\\]+",
 )
 MAGNET_RE = re.compile(r"magnet:\?xt=urn:btih:[a-zA-Z0-9]+")
+# ggbases 的磁力页链接：magnet.so?id=N（相对 / 绝对 / 裸形式都见过）
+MAGNET_ID_RE = re.compile(r"magnet\.so\?id=(\d+)", re.I)
+# BTIH hash：40 位十六进制（v1）或 32 位 base32
+MAGNET_HASH_RE = re.compile(r"[a-fA-F0-9]{40}|[A-Za-z2-7]{32}")
 CODE_RE = re.compile(r"(?:提取码|密码|访问码|pwd)\s*[:：=]?\s*([a-zA-Z0-9]{4,8})")
 QR_RE = re.compile(
     r"https?://[^\s\"'<>\\]*qrserver[^\s\"'<>\\]*[?&]data=([^&\"'<>\\]+)"
@@ -124,6 +128,35 @@ def decode_gb_dl_links(html: str) -> list[str]:
         if real.startswith("http") and real not in out:
             out.append(real)
     return out
+
+
+def parse_magnet_ids(html: str, detail_url: str = "") -> list[str]:
+    """抽 ggbases 的磁力页数字 id（按出现顺序去重）。
+
+    优先取**详情页 URL 自身的 `?id=N`**：真站实测详情页里没有
+    `magnet.so?id=N` 这种 href —— 磁力是 JS 按钮 `.dbutton[bt=3]`，
+    点击时才拼 `magnet.so?downid=<uuid>&id=N`。所以 N 只能从详情页
+    URL 拿（`view.so?id=131080` → `131080`）。页面里若真有
+    `magnet.so?id=` 链接也一并收进来（兼容别的形状）。
+    """
+    out: list[str] = []
+    if detail_url:
+        m = re.search(r"[?&]id=(\d+)", detail_url)
+        if m:
+            out.append(m.group(1))
+    for m in MAGNET_ID_RE.finditer(html or ""):
+        mid = m.group(1)
+        if mid not in out:
+            out.append(mid)
+    return out
+
+
+def build_magnet_url(hash_: str) -> str | None:
+    """把裸 hash 拼成磁力链；不是合法 hex hash 就返回 None（不猜）。"""
+    h = (hash_ or "").strip()
+    if not MAGNET_HASH_RE.fullmatch(h):
+        return None
+    return f"magnet:?xt=urn:btih:{h}"
 
 
 def _extract_cover(html: str) -> str | None:

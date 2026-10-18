@@ -41,7 +41,13 @@ ASSET_RE = re.compile(
     r"($|\?)", re.I
 )
 DETAILISH_RE = re.compile(
-    r"(/\d{2,}|/game/|/detail|/post/|/topic/detail/|/subject/|/entry/|\.html$|/item/)",
+    # `/\d{2,}` 必须「整段就是数字」：否则 `/2257.so`（ggbases 页脚的法律声明页）
+    # 会被当成详情页给 1.0，搜索 0 结果时 pick_best 只能选中它（真站实测）。
+    r"(/\d{2,}(?:/|$|\?|#)|/game/|/detail|/post/|/topic/detail/|/subject/|/entry/"
+    r"|\.html$|/item/"
+    # `.so?id=N` / `.php?id=N` / `.aspx?id=N` 这类「脚本 + 数字 id」详情页
+    # （ggbases 实测：view.so?id=131080 曾是 0.5 分，选不中）
+    r"|\.(?:so|php|aspx?|cgi)\?[^#]*\bid=\d+)",
     re.I,
 )
 # 纯 slug 型详情页（实测 2026-10-18，两条都曾被判成 0.5 分而选不中）：
@@ -190,6 +196,11 @@ ANCHOR_RE = re.compile(r'<a\b([^>]*?)\bhref=["\']([^"\']+)["\']([^>]*)>', re.I)
 TITLE_ATTR_RE = re.compile(
     r'(?:^|\s)(?:title|alt|aria-label)=["\']([^"\']{2,400})["\']', re.I
 )
+# 只认 alt= / aria-label=（用于内层 <img alt=> 封面标题），不含 title=：
+# 内层 title= 常是上传者名（ggbases 实测），抢走它会丢掉真正的游戏名。
+ALT_ATTR_RE = re.compile(
+    r'(?:^|\s)(?:alt|aria-label)=["\']([^"\']{2,400})["\']', re.I
+)
 
 
 def build_search_url(site: Site, query: str) -> str:
@@ -219,14 +230,51 @@ def _strip_fragment(url: str) -> str:
 
 
 def _anchor_title(attrs: str, body_html: str) -> str:
-    """取链接标题：<a title=> / <a><img alt=> 优先，否则取 </a> 之前的可见文本。"""
-    found = TITLE_ATTR_RE.findall(attrs + " " + body_html[:400])
-    if found:
-        return re.sub(r"\s+", " ", found[0]).strip()[:300]
-    end = re.search(r"</a\s*>", body_html, re.I)
-    inner = body_html[: end.end()] if end else body_html[:600]
+    """取链接标题：锚点自身的 title= > 内层 img alt= > </a> 之前的可见文本。
+
+    注意「锚点自身」这一点（2026-10-18 ggbases 实测）：结果行是嵌套锚点
+
+        <a href="...view.so?id=131080">
+          <a class="keya" title="2D.G.F.">2D.G.F.</a>   <- 上传者名
+          <b>制服カノジョ3 めいか初恋BOX</b>              <- 真正的标题
+        </a>
+
+    旧实现在 `attrs + body[:400]` 上一起找 title=，于是命中的是**内层**的
+    `title="2D.G.F."`，游戏名整个丢失 → pick_best 拿不到查询词命中，
+    三语全部 WRONG_GAME。所以必须分段找：先只看锚点自身的 attrs。
+    """
+    own = TITLE_ATTR_RE.findall(attrs)
+    if own:
+        return re.sub(r"\s+", " ", own[0]).strip()[:300]
+    alt = ALT_ATTR_RE.findall(attrs + " " + body_html[:400])
+    if alt:
+        return re.sub(r"\s+", " ", alt[0]).strip()[:300]
+    inner = _outer_anchor_inner(body_html)
     text = re.sub(r"<[^>]+>", " ", inner)
     return re.sub(r"\s+", " ", text).strip()[:300]
+
+
+_ANCHOR_TAG_RE = re.compile(r"<a\b|</a\s*>", re.I)
+
+
+def _outer_anchor_inner(body_html: str) -> str:
+    """取「外层锚点」的内部 HTML，正确处理嵌套 `<a>`。
+
+    不能简单截到第一个 `</a>`：ggbases 的结果行是
+        <a href="view.so?id=131080"><a title="2D.G.F.">2D.G.F.</a><b>游戏名</b></a>
+    截到第一个 `</a>` 只会拿到上传者名，游戏名在后面被切掉。
+    这里按 `<a` / `</a>` 的嵌套深度找到与外层配对的那个结束标签。
+    """
+    depth = 1
+    limit = min(len(body_html), 4000)
+    for m in _ANCHOR_TAG_RE.finditer(body_html, 0, limit):
+        if m.group(0).lower().startswith("</"):
+            depth -= 1
+            if depth == 0:
+                return body_html[: m.start()]
+        else:
+            depth += 1
+    return body_html[: min(len(body_html), 600)]
 
 
 def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
