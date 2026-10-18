@@ -24,14 +24,14 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **249 个离线测试全绿** |
+| 代码 / 测试 | ✅ **324 个离线测试全绿** |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
 | 缓存 | ✅ 重复搜索 **53.9s → 0.5s（115x）**，成功 12h / 失败 30min |
 | **出下载的站（中文「终焉之莉莉」）** | **2 / 21** — jidiyouxi、touchgal |
-| **出下载的站（英文「enderlilies」）** | **3 / 21** — gamer520、gamebounty、touchgal |
-| **出下载的站（日文「制服カノジョ」）** | **6 / 21** — sayafx、nyaa、touchgal、galgamex、ggbases、anime-sharing |
+| **出下载的站（英文「enderlilies」）** | **5 / 21** — ankergames、gamebounty、gamer520、playzip、touchgal |
+| **出下载的站（日文「制服カノジョ」）** | **8 / 21** — sayafx、nyaa、inarigal、nekogal、ggbases、touchgal、galgamex、anime-sharing |
 | 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板**（用户明确说不需要定时器） |
 
 「诚实报错」是本版的重要目标：宁可显示「没找到」，也不给用户一张错误的卡片。
@@ -279,7 +279,7 @@ finder/health.py            classify / check_site（状态机就绪，无定时�
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
 finder/web/static/index.html  单页 UI
-tests/                      209 个离线测试 + fixtures
+tests/                      324 个离线测试 + fixtures
 ```
 
 ---
