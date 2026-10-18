@@ -24,14 +24,14 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **242 个离线测试全绿** |
+| 代码 / 测试 | ✅ **249 个离线测试全绿** |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
 | 缓存 | ✅ 重复搜索 **53.9s → 0.5s（115x）**，成功 12h / 失败 30min |
 | **出下载的站（中文「终焉之莉莉」）** | **2 / 21** — jidiyouxi、touchgal |
 | **出下载的站（英文「enderlilies」）** | **3 / 21** — gamer520、gamebounty、touchgal |
-| **出下载的站（日文「制服カノジョ」）** | **7 / 21** — sayafx、nyaa、touchgal、galgamex、anime-sharing、**ggbases**、**kungal** |
+| **出下载的站（日文「制服カノジョ」）** | **6 / 21** — sayafx、nyaa、touchgal、galgamex、ggbases、anime-sharing |
 | 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板**（用户明确说不需要定时器） |
 
 「诚实报错」是本版的重要目标：宁可显示「没找到」，也不给用户一张错误的卡片。
@@ -55,11 +55,11 @@ python app.py
 | lzacg | BLOCKED_SEARCH | BLOCKED_SEARCH | BLOCKED_SEARCH |
 | acggw | NO_RESULTS | NO_RESULTS | NO_RESULTS |
 | nekogal | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| ggbases | WRONG_GAME→NO_RESULTS（站点真 0 条） | NO_RESULTS | **dl=7** ✅ |
 | **touchgal** | **dl=4** ✅ | **dl=4** ✅ | **dl=3** ✅ |
 | **galgamex** | NO_RESULTS | NO_RESULTS | **dl=1** ✅ |
 | **kungal** | NO_DOWNLOADS（该游戏本体页暂无） | NO_RESULTS | NO_DOWNLOADS（同上） |
-| **anime-sharing** | NO_RESULTS | NO_RESULTS | **dl=10** ✅ |
+| **ggbases** | NO_RESULTS（站点 0 条） | NO_RESULTS（站点 0 条） | **dl=7** ✅ |
+| **anime-sharing** | NO_RESULTS | NO_RESULTS | **dl=3** ✅ |
 | galgame.dev | NO_RESULTS | NO_RESULTS | NO_RESULTS |
 
 **关键判断：「没结果」不等于「坏了」。** 必须先做对照实验——用本站必定存在的游戏
@@ -178,6 +178,24 @@ python app.py
     压 6 分（压分不排除，只有帖子命中时仍返回）。
 16. **官方名带排版装饰导致匹配失败**（kungal）
     站点官方名是「千恋＊万花」（全角星号 U+FF0A），用户输入「千恋万花」时
+17. **论坛帖 slug 被判 0.5 分**（anime-sharing 回归）
+    收紧 `DETAILISH_RE` 的 `/\d{2,}(?:/|$|\?|#)`（为挡 ggbases 的 `/2257.so`）
+    连带把 XenForo 的 `/threads/<slug>/` 打掉——数字埋在 slug 中间、无扩展名。
+    20 条帖子全掉到 0.5 分，`pick_best` 的 `>=1.0` 候选池空了，该站从 dl=10
+    退化成 `NO_RESULTS`。修法：`DETAILISH_RE` 增加 `/threads/[^/?#]+/?` 分支，
+    **只认 `/threads/`**（不放宽 `/数字`，也不碰 `/members/<name>.<id>/`）。
+
+18. **求资源帖盖过发布帖**（anime-sharing）
+    `[Request] 制服カノジョ 2` 标题以查询词开头、位置分拿满，压过前面带日期
+    和厂商前缀的真发布帖，于是抽出 0 条下载、报 `NO_DOWNLOADS`。
+    修法：新增 `REQUEST_RE`（`[Request]`/`[REQ]`/`[求档]`/`[求资源]` 等前缀），
+    命中压 6 分；压分不排除——站上只有求资源帖时仍如实返回。
+
+19. **页面装饰资源被当成下载**（anime-sharing）
+    `assets.katfile.com/favicon.ico`（域名命中 filehost）与
+    `p.anime-sharing.com/proxy.php?image=...`（路径含 `/file`）都混进了下载列表。
+    修法：新增 `ASSET_URL_RE`，跳过 favicon / 图片代理 / 图片样式扩展名。
+    实测该站 dl=5 → 3（rapidgator / filejoker / krakenfiles）。
     子串匹配直接失败。`_norm` 增加装饰符号清理；CJK 查询额外允许「去空格后」
     再匹配一次（拉丁短查询不启用，否则 `AI` 会命中 `Chained`）。
 
@@ -268,16 +286,29 @@ tests/                      209 个离线测试 + fixtures
 
 ## 九、下一步建议（按价值排序）
 
-1. **查 ggbases** 三语全部 WRONG_GAME 的原因。
-2. **kungal** 的 resource 页需要点标签页才渲染，目前 `NO_DOWNLOADS`。
-3. **接上健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，
-   所以**不做**。`health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
+### 已修完的站（原建议 1、2）
 
-### 本轮已完成（原建议 2、3）
+- **ggbases** ✅ 三语 WRONG_GAME → 日文 dl=7、中文/英文 `NO_RESULTS: 0 個資源`（站点真 0 条）
+- **kungal** ✅ SPA 标签页 + `\u002F` 转义 + base64 封面 + 讨论帖压分，`千恋万花` → dl=23
+- **anime-sharing** ✅ 论坛帖 slug + 求资源帖压分 + 页面装饰过滤，`制服カノジョ` → dl=3
 
-- **Store 缓存接线**：`pipeline.run(..., store=...)`，缓存键 = `(归一化截断后查询词, site_id)`。
-  成功结果 12h，失败结果 30min（`fail_ttl_minutes`），`refresh=true` 绕过。
-  实测重复搜索 53.9s → **0.5s**，`cached=11/11`。
+### 仍待处理
+
+1. **`NO_RESULTS: pick_best returned None` 的 5 站**（jidiyouxi / byrutgame / ankergames /
+   nekogal / galgame.dev）。要先做对照实验区分两种成因：
+   - 候选全是 0.5 分（详情形状判据不认该站 URL）→ 改 `DETAILISH_RE` 或给站点配 `detail_pattern`
+   - 候选有 1.0 分但标题里没有查询词（该站用别的语言/罗马音命名）→ 站点事实
+   实测：jidiyouxi 查日文 0 命中属正常（它是中文站，语种路由已排除它）。
+2. **gamebounty 的 `WRONG_GAME`**（查日文）：搜索返回 1 条但页面证据 0。该站 `/zh/` 前缀
+   强制中文界面，查日文游戏名匹配不到正文 —— 可能需要去掉 `/zh/` 或按语种切前缀。
+3. **两个 `BLOCKED_SEARCH`**（nysoure、lzacg）：Cloudflare 按出口 IP 拦。属基础设施问题，
+   用户换节点或加登录态后才可能通，代码侧无解。
+4. **健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，**不做**。
+   `health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
+
+### 已完成的基础设施
+
+- **Store 缓存接线**：缓存键 = `(归一化截断后查询词, site_id)`，成功 12h / 失败 30min，
+  `refresh=true` 绕过。实测重复搜索 53.9s → **0.5s**。
 - **并发化**：`config.yaml` 的 `search.workers`（默认 3），每 worker 一份独立
-  `chrome-profile-w<N>`，从主 profile 播种登录态（0.02s，只拷 cookies 等小文件）。
-  实测 93.1s → **44.1s（2.1x）**，出下载的站与串行完全一致。
+  `chrome-profile-w<N>`，从主 profile 播种登录态（0.02s）。实测 93.1s → **44.1s（2.1x）**。
