@@ -47,7 +47,12 @@ DETAILISH_RE = re.compile(
     r"|\.html$|/item/"
     # `.so?id=N` / `.php?id=N` / `.aspx?id=N` 这类「脚本 + 数字 id」详情页
     # （ggbases 实测：view.so?id=131080 曾是 0.5 分，选不中）
-    r"|\.(?:so|php|aspx?|cgi)\?[^#]*\bid=\d+)",
+    r"|\.(?:so|php|aspx?|cgi)\?[^#]*\bid=\d+"
+    # 论坛帖 slug：数字埋在 slug 中间、无扩展名，上面 `/\d{2,}(?:/|$)` 匹配不到。
+    # anime-sharing 实测 `/threads/new-release-260910-エンターグラム/` 曾被判 0.5，
+    # 整站从 dl=10 退化成 pick_best=None。只认 `/threads/`（XenForo 形状），
+    # 不放宽到 `/members/<name>.<id>/`（用户页不该当资源）。
+    r"|/threads/[^/?#]+/?)",
     re.I,
 )
 # 纯 slug 型详情页（实测 2026-10-18，两条都曾被判成 0.5 分而选不中）：
@@ -290,6 +295,16 @@ _DATA_URI_RE = re.compile(r"data:[\w/+.\-]+;base64,[A-Za-z0-9+/=\s]{200,}", re.I
 # `/topic/detail/<id>`），所以这里要求数字紧跟在 topic/post/thread/forum 后。
 THREAD_RE = re.compile(r"/(?:topic|post|thread|forum)/(\d+)/?$", re.I)
 
+# 「求资源」帖：标题带 [Request] / [REQ] / 求档 之类前缀，正文是「谁有这个」，
+# 不含下载链接。实测 2026-10-18（anime-sharing 查「制服カノジョ」）：求资源帖
+# 标题以查询词开头拿满位置分，压过前面带日期/厂商前缀的真发布帖，
+# 于是抽出 0 条下载、报 NO_DOWNLOADS。压分不排除（见 pick_best）。
+REQUEST_RE = re.compile(
+    r"^\s*[\[\(【]?\s*(?:request|req|wanted|looking\s+for|iso)\s*[\]\)】]?"
+    r"|[\[\(【]\s*(?:request|req|求档|求資源|求资源|求物)\s*[\]\)】]",
+    re.I,
+)
+
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
 
@@ -471,6 +486,10 @@ def pick_best(hits: list[SearchHit], query: str, min_score: float = 1.0) -> Sear
             score += sum(1 for ch in qn if ch in t) / len(qn)
         score += h.score * 0.1
         if THREAD_RE.search(urlparse(h.url).path or ""):
+            score -= 6.0
+        if REQUEST_RE.search(raw_title):
+            # 求资源帖：标题里没有「有下载」的信号，压到发布帖之下。
+            # 压分而非排除 —— 站上只有求资源帖时仍要如实返回。
             score -= 6.0
         if score > best_score:
             best_score = score

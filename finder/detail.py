@@ -33,6 +33,15 @@ FILEHOST_DOMAINS = (
     "datanodes.to", "filemoon.sx", "krakenfiles.com", "uploadhaven.com",
 )
 
+# 页面装饰资源：图标、图片代理、追踪像素。它们会因为域名里带 filehost 关键字
+# 或路径里带 /file 而被 _classify 判成下载（anime-sharing 实测：favicon.ico 与
+# p.anime-sharing.com/proxy.php?image= 都被当成 filehost 混进结果）。
+ASSET_URL_RE = re.compile(
+    r"(?:favicon\.ico|/proxy\.php\?image=|/apple-touch-icon|/logo\.(?:png|svg|gif)"
+    r"|\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf)(?:\?|#|$))",
+    re.I,
+)
+
 # gamebounty 的下载按钮不指向文件主机本身，而是同源跳板：
 #   /api/dl/{slug}/{base64url(真实URL)}
 # 解码后才是 rapidgator/pixeldrain 之类的真链（实测 2026-10-18）。
@@ -228,6 +237,8 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
             continue  # 二维码图片；其载荷由 decode_qr_pan_links 提供
         if "/api/dl/" in url:
             continue  # gamebounty 跳板；真链由 decode_gb_dl_links 提供
+        if ASSET_URL_RE.search(url):
+            continue  # 图标/图片/样式等页面装饰，不是可下载的资源
         kind = _classify(url)
         if kind == "unknown":
             continue

@@ -24,14 +24,14 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **209 个离线测试全绿** |
+| 代码 / 测试 | ✅ **242 个离线测试全绿** |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
 | 缓存 | ✅ 重复搜索 **53.9s → 0.5s（115x）**，成功 12h / 失败 30min |
 | **出下载的站（中文「终焉之莉莉」）** | **2 / 21** — jidiyouxi、touchgal |
 | **出下载的站（英文「enderlilies」）** | **3 / 21** — gamer520、gamebounty、touchgal |
-| **出下载的站（日文「制服カノジョ」）** | **5 / 21** — sayafx、nyaa、touchgal、galgamex、anime-sharing |
+| **出下载的站（日文「制服カノジョ」）** | **7 / 21** — sayafx、nyaa、touchgal、galgamex、anime-sharing、**ggbases**、**kungal** |
 | 健康巡检 | ⚠️ 状态机完成；**无定时器、无快照、无 UI 面板**（用户明确说不需要定时器） |
 
 「诚实报错」是本版的重要目标：宁可显示「没找到」，也不给用户一张错误的卡片。
@@ -55,10 +55,10 @@ python app.py
 | lzacg | BLOCKED_SEARCH | BLOCKED_SEARCH | BLOCKED_SEARCH |
 | acggw | NO_RESULTS | NO_RESULTS | NO_RESULTS |
 | nekogal | NO_RESULTS | NO_RESULTS | NO_RESULTS |
-| ggbases | WRONG_GAME | WRONG_GAME | WRONG_GAME |
+| ggbases | WRONG_GAME→NO_RESULTS（站点真 0 条） | NO_RESULTS | **dl=7** ✅ |
 | **touchgal** | **dl=4** ✅ | **dl=4** ✅ | **dl=3** ✅ |
 | **galgamex** | NO_RESULTS | NO_RESULTS | **dl=1** ✅ |
-| kungal | NO_DOWNLOADS | NO_RESULTS | NO_DOWNLOADS |
+| **kungal** | NO_DOWNLOADS（该游戏本体页暂无） | NO_RESULTS | NO_DOWNLOADS（同上） |
 | **anime-sharing** | NO_RESULTS | NO_RESULTS | **dl=10** ✅ |
 | galgame.dev | NO_RESULTS | NO_RESULTS | NO_RESULTS |
 
@@ -66,6 +66,15 @@ python app.py
 （`千恋万花` / `Summer Pockets`）验证搜索功能本身是否正常，再判断是「站上真没这款游戏」
 还是「代码坏了」。上表里 gamebounty（中文 0 条）、sayafx（索引无该条）、acggw（全中文查询 0 条）
 都属于**站点真的没有**，已用对照实验确认。
+
+**kungal 的两个 NO_DOWNLOADS 也是站点事实**：`终焉之莉莉` 与 `制服カノジョ2` 的
+「本体资源下载」标签页本身就写「暂无」。同一适配器查 `千恋万花` 能抽出 **dl=23**
+（夸克/百度网盘），说明代码是通的 —— 判据是「标签页点开后有没有内容」，
+不是「这一款有没有资源」。
+
+**ggbases 三语从 WRONG_GAME 变成正确**：`制服カノジョ` → dl=7（rapidgator/katfile 直链
++ `magnet:?xt=urn:btih:`）；`终焉之莉莉`/`enderlilies` → `NO_RESULTS: 0 個資源`
+（该站确实没有这两款，对照实验：`サノバウィッチ` 11 条、`制服カノジョ` 7 条）。
 
 ---
 
@@ -131,6 +140,46 @@ python app.py
    `TargetClosedError`。11 站 3 槽时 `idx % 3` 会让多线程撞同一目录。
    改成 `queue.Queue` 发放 + 用完归还。`test_each_concurrent_worker_gets_a_distinct_profile`
    已锁住（临时改回取模会失败）。
+8. **嵌套锚点的标题被内层 `title=` 抢走**（ggbases，三语全 WRONG_GAME）
+   结果行是 `<a href="view.so?id=N"><a class="keya" title="2D.G.F.">…</a><b>游戏名</b></a>`，
+   旧实现把 `attrs + body[:400]` 一起找 `title=`，命中的是**上传者名**，
+   游戏名整个丢失。改为先只看锚点自身 attrs，`ALT_ATTR_RE` 刻意不含 `title=`，
+   最后按 `<a`/`</a>` 嵌套深度找配对结束标签。
+9. **`/2257.so` 法务页被判成详情页**（ggbases）
+   `DETAILISH_RE` 的 `/\d{2,}` 命中 `/2257.so` 判 1.0，而真详情 `view.so?id=N` 判 0.5，
+   `pick_best` 的 `score >= 1.0` 池子里只剩法务页。收窄为 `/\d{2,}(?:/|$|\?|#)`
+   并新增 `\.(?:so|php|aspx?|cgi)\?[^#]*\bid=\d+`。
+10. **空结果页认不出（NBSP + HTML 实体）**（ggbases）
+    真站文案是 `GGBases\xa0>\xa0 0\xa0個資源`（不间断空格 U+00A0）。
+    根因比标记表更深：`_visible_text` 只去标签**没做实体反转义**，拿到的是字面
+    `&nbsp;`。修法：加 `html.unescape` + `_SPACEY_RE` 归一化 U+00A0 一类空白。
+11. **磁力 hash 要页面内 fetch 两步取**（ggbases）
+    详情页无 `magnet:` 文本；hash 在 `magnet.so?id=N` 页由 JS 用
+    `POST /magnet.so?downid=<uuid>&json=1&id=N` 取。**必须先真 `goto` 那个页面**
+    （downid 是那页渲染时生成的），再用 `page.evaluate` 页面内 fetch。
+    `page.request.post` 走独立 TLS 连接，实测 30s 超时 / ECONNRESET。
+12. **下载链藏在 SPA 标签页后面**（kungal）
+    `/galgame/{id}` 默认停在「游戏介绍」，正文零网盘链；点「本体资源下载」后
+    **同页**渲染出资源列表（不跳转）。原有 `_follow_detail_gate` 要求
+    `detail_follow_pattern` 才动作，这种「只点不开」的站永远不触发。
+    新增 reveal 分支：只配 `detail_open_selector` 即就地重抽。
+13. **内嵌 JSON 的 `\u002F` 转义斜杠**（kungal）
+    资源页正文在 Nuxt payload 里，链接写作 `"https:\u002F\u002Fpan.baidu.com…"`。
+    `URL_RE` 排除反斜杠 → 整页 685 处 `\u002F` 一条都抽不出。
+    `html.unescape` 只处理 `&amp;`，不动 JSON 转义，必须单独还原斜杠形态。
+14. **base64 封面把卡片标题挤掉**（kungal）
+    单张结果卡的 innerHTML 有 8201 字符、其中 8000+ 是内联 base64 PNG；
+    `_anchor_title` 只拿到 700 字符窗口 → 游戏名永远在窗口外，标题退化成
+    `'<div class="kun-image-blur '`。扫描前压掉 data URI 载荷 + 内层扫描上限提到 20k。
+15. **讨论帖盖过游戏条目页**（kungal）
+    查「千恋万花」同时命中 `/topic/3887`（十周年讨论帖）与 `/galgame/15`（游戏条目）。
+    帖子标题以查询词开头拿满位置分，条目页标题前面有统计数字 → 选中讨论帖，
+    用户拿不到下载。`pick_best` 对 `/topic/<n>`、`/post/<n>` 这类**纯讨论串形状**
+    压 6 分（压分不排除，只有帖子命中时仍返回）。
+16. **官方名带排版装饰导致匹配失败**（kungal）
+    站点官方名是「千恋＊万花」（全角星号 U+FF0A），用户输入「千恋万花」时
+    子串匹配直接失败。`_norm` 增加装饰符号清理；CJK 查询额外允许「去空格后」
+    再匹配一次（拉丁短查询不启用，否则 `AI` 会命中 `Chained`）。
 
 ---
 
@@ -143,8 +192,14 @@ python app.py
   搜索页混着大量 WordPress 导航菜单链接，必须剥离站点外壳（平衡扫描，不是正则）。
 - **gamebounty**：`/api/v1/search?q=&page=&size=` 也能用（返回 JSON）；
   `/api/dl/` 是 base64url 包装。
-- **kungal**：wiki + 论坛，`/galgame/<id>` 是 wiki 页「本体资源下载」标签页可能是「暂无」；
-  `/galgame/resource/<id>` 才是资源条目。注意不同游戏的 resource 会混在搜索结果里。
+- **kungal**：wiki + 论坛。`/galgame/<id>` 是 wiki 页，默认停在「游戏介绍」，
+  要点「本体资源下载」标签页才在**同页**渲染资源列表（`detail_open_selector`，
+  不配 `detail_follow_pattern`）；有些游戏的该标签页直接是「暂无」。
+  `/galgame/resource/<id>` 才是具体资源条目。正文在 Nuxt payload 里，
+  链接是 `\u002F` 转义形态。搜索结果混着 `/topic/<n>` 讨论帖，`pick_best` 会压分。
+- **ggbases**：`search.so?p=0&title={q}`；结果行是**嵌套锚点**（内层 title= 是
+  上传者名）；详情 `view.so?id=N`；磁力要 goto `magnet.so?id=N` 再页面内 fetch 取 hash。
+  空结果是 `0 個資源`（NBSP）。`kinds: [磁力, 直链]` 两种都服务。
 - **ggbases**：三语查询全部 `WRONG_GAME`，搜索结果标题与查询词无证据 → 适配器待查。
 - **nysoure / lzacg**：Cloudflare 拦截（`cf-error-details` / `attention required`），
   属代理出口 IP 被拒，不是代码问题。
