@@ -31,8 +31,11 @@ NAV_RE = re.compile(
     r"privacy|terms|feed|rss|user|profile|search|wp-content|wp-admin|wp-json|"
     r"wp-includes|assets|static|list|lists|forums?|thread|donations?|"
     # `/archives/category/…`、`/archives/tag/…`、`/archives/2026`（年份归档）
-    # 都是列表页；但 `/archives/67` 是文章详情页（nekogal 实测），不能一起剔。
-    r"archives?/(?:category|tag|author|date|page|\d{4}(?:/|$))|"
+    # 都是列表页；但 `/archives/67`、`/archives/6661` 是文章详情页（nekogal
+    # 实测），不能一起剔。年份必须收紧成 19xx/20xx —— 原来写 `\d{4}` 会把
+    # id=6661 这类四位数文章页当年份归档删掉，查「制服カノジョ」时该站明明
+    # 有 3 篇结果却解析出 0 条。
+    r"archives?/(?:category|tag|author|date|page|(?:19|20)\d{2}(?:/|$))|"
     r"board|boards)(/|$|\?)", re.I
 )
 # 终端段导航（`/game`、`/games`、`/index.php` 这类列表入口）。
