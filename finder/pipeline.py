@@ -94,9 +94,12 @@ NO_RESULTS_MARKERS = (
     #   gamebounty → "没有关于“千恋万花”的结果"（2026-10-18 实测；英文界面
     #   时是 "No results for ..."）。少了它，空结果会掉进
     #   "NO_RESULTS: pick_best returned None"，看不出是站点真的没有。
+    #   jidiyouxi → "无相关搜索"（实测查不存在的游戏时，同时 游戏专区 (0)）
     "没有关于",
     "没有相關",
     "no results for",
+    "无相关搜索",
+    "無相關搜索",
 )
 
 
@@ -293,6 +296,24 @@ def _visible_text(html: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+# 站点自己的前端接口挂掉时的特征。这类页面长得像空结果，但其实是暂态：
+# jidiyouxi 实测 `游戏专区 (0) … 无相关搜索 Network Error`，隔一会儿重开
+# 同一个 URL 就正常出结果（40 条）。必须重试，不能记成 NO_RESULTS。
+TRANSIENT_MARKERS = ("network error",)
+
+# 暂态页的正文极短（jidiyouxi 实测 164～215 字符），真实结果页上千字符。
+# 只用标记命中判断即可；这个阈值用于「标记没命中但正文短得可疑」时补一次重试。
+_TRANSIENT_TEXT_MIN = 300
+
+
+def _looks_transient(html: str) -> bool:
+    text = _SPACEY_RE.sub(" ", _visible_text(html))
+    low = text.lower()
+    if any(m in low for m in TRANSIENT_MARKERS):
+        return True
+    return len(text) < _TRANSIENT_TEXT_MIN
+
+
 def looks_blocked(title: str, html: str) -> str | None:
     """返回命中的拦截特征（原文小写），没命中返回 None。
 
@@ -338,14 +359,42 @@ def match_strength(query: str, hit_title: str) -> tuple[float, str]:
     return rate, ("strong" if rate >= 0.8 else "weak" if rate > 0 else "none")
 
 
-def _goto(page, url: str, timeout: int) -> tuple[int | None, str | None]:
-    """导航到 url。返回 (http_status, nav_error)；nav_error 不为 None 时页面可能是残页。"""
-    try:
-        resp = page.goto(url, timeout=timeout, wait_until="load")
-        status = getattr(resp, "status", None) if resp is not None else None
-        return status, None
-    except Exception as exc:  # noqa: BLE001
-        return None, f"{type(exc).__name__}: {str(exc)[:200]}"
+# 网络层可重试的失败（不是站点真的没有内容，而是连接抖了 / 被限流一瞬间）
+RETRYABLE_NAV = (
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_ABORTED",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_NETWORK_CHANGED",
+    "ERR_TIMED_OUT",
+    "Timeout",
+)
+
+
+def _goto(page, url: str, timeout: int, retries: int = 0) -> tuple[int | None, str | None]:
+    """导航到 url。返回 (http_status, nav_error)；nav_error 不为 None 时页面可能是残页。
+
+    `retries>0` 时对**网络层**失败退避重试：jidiyouxi 在短时间连续搜索后会
+    直接 `ERR_CONNECTION_CLOSED`（实测同 URL 隔一会儿再来就 200），
+    ggbases 偶发 `Page.goto: Timeout 45000ms exceeded`。这类不是站点的
+    内容结论，不该被记成「搜索失败」。HTTP 4xx/5xx **不重试** —— 那是
+    站点的明确回答。
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = page.goto(url, timeout=timeout, wait_until="load")
+            status = getattr(resp, "status", None) if resp is not None else None
+            return status, None
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {str(exc)[:200]}"
+            if attempt >= retries or not any(m in msg for m in RETRYABLE_NAV):
+                return None, msg
+            attempt += 1
+            try:
+                _settle(page, 1500 * attempt)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # 「下载跳板」链接形状：本站中转到网盘落地页的中间层
@@ -554,8 +603,22 @@ def search_one(
 
     if site.search.mode == "url":
         url = build_search_url(site, q)
-        status, nav_error = _goto(page, url, timeout_ms)
+        status, nav_error = _goto(page, url, timeout_ms, retries=2)
         _settle(page)
+        # 站内搜索接口偶发失败会渲染成空列表 + 自己的错误提示，看起来跟
+        # 「真的没有」一模一样。jidiyouxi 实测：同一个 URL 前一次正文只有
+        # `游戏专区 (0) … 无相关搜索 Network Error`（HTML 54KB），隔几分钟
+        # 再来同样的请求就正常渲染出结果。**这类暂态必须先重试**，否则会把
+        # 「站点抖了一下」永久记成 NO_RESULTS（还会进失败缓存）。
+        for _retry in range(2):
+            if not _looks_transient(page.content()):
+                break
+            extra.setdefault("search_transient_retries", 0)
+            extra["search_transient_retries"] += 1
+            _settle(page, 4000)
+            if _looks_transient(page.content()):
+                _goto(page, url, timeout_ms)
+                _settle(page, 4000)
     else:
         start_url = site.search.form_url or site.homepage
         status, nav_error = _goto(page, start_url, timeout_ms)
@@ -591,9 +654,14 @@ def search_one(
     search_html = page.content()
     search_title = _page_title(page)
     search_block = looks_blocked(search_title, search_html)
-    no_results = looks_no_results(search_title, search_html)
+    marker = looks_no_results(search_title, search_html)
     hits = parse_result_links(search_html, search_url, site)
     best = pick_best(hits, q)
+    # 有候选时不能让「无结果」标记覆盖它：有些站的空结果文案是**常驻模板**，
+    # 有结果时也照样留在 DOM 里。playzip 实测 `hollow knight` 2 条真结果、
+    # `No results found,` 那个 div 仍然 display:block 可见 —— 纯文本无法区分，
+    # 只有「解析出候选」才是硬证据。标记仍然写进 extra 供排查。
+    no_results = marker if best is None else None
 
     extra.update(
         {
@@ -608,8 +676,10 @@ def search_one(
         extra["search_nav_error"] = nav_error
     if search_block:
         extra["search_block_marker"] = search_block
-    if no_results:
-        extra["no_results_marker"] = no_results
+    if marker:
+        extra["no_results_marker"] = marker
+        if no_results is None:
+            extra["no_results_overridden_by_hits"] = len(hits)
     if best is not None:
         rate, strength = match_strength(q, best.title)
         extra.update(
@@ -660,7 +730,7 @@ def _extract_detail(
     extra: dict[str, Any],
 ) -> GameDetail:
     """进详情页并抽卡 + 内容证据闸门。url/form/index 三种模式共用这一段。"""
-    d_status, d_nav_error = _goto(page, target_url, timeout_ms)
+    d_status, d_nav_error = _goto(page, target_url, timeout_ms, retries=2)
     _settle(page)
     detail_url = page.url
     detail_html = page.content()
