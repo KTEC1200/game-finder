@@ -18,6 +18,81 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# 结果分档 & 排序
+# ---------------------------------------------------------------------------
+# 直链的字面值必须与 models.DownloadKind 对齐：
+#   DownloadKind = Literal["direct", "pan", "magnet", "filehost", "unknown"]
+# tests/test_result_order.py 断言 DIRECT_KIND 真的在 get_args(DownloadKind) 里，
+# 免得 models 改名后这里悄悄失配。
+DIRECT_KIND = "direct"
+
+# 分档的先后 == 用户要求的排序优先级（m00620：「找到链接的排前面」）。
+OUTCOME_ORDER = {"direct": 0, "pan": 1, "no_links": 2, "not_found": 3}
+
+# 「站点确实找到了这款游戏、只是抽不到下载链接」的错误前缀（详情页级）。
+# 注意 NEEDS_LOGIN 有两种语意，靠 extra["search_login_wall"] 区分（见 outcome_of），
+# 不去比对中文文案。
+NO_LINKS_PREFIXES = frozenset({
+    "NO_DOWNLOADS", "NEEDS_GATE", "NEEDS_COMMENT", "NEEDS_LOGIN",
+})
+
+
+def _error_prefix(error: str | None) -> str:
+    """`NO_RESULTS: xxx` -> `NO_RESULTS`；`NO_DOWNLOADS`（无冒号）原样返回。"""
+    if not error:
+        return ""
+    return error.split(":", 1)[0].strip()
+
+
+def outcome_of(d: GameDetail) -> str:
+    """这个站对这次查询到底「找到了什么」，四档之一：
+
+      direct     有直链：downloads 里有 kind == DIRECT_KIND 的条目
+      pan        有下载但都不是直链（网盘 / 磁力 / filehost …）
+      no_links   站点找到了这款游戏，但没有可下载的链接
+      not_found  根本没搜到（无结果 / 选错游戏 / 表单失败 / 被拦 / 搜索页登录墙 …）
+
+    只读 error / downloads / extra：NO_RESULTS 的实测形状是 url=None, title=''
+    （例：acggw），任何字段为 None 都不该抛异常。
+    """
+    downloads = getattr(d, "downloads", None) or []
+    if downloads:
+        if any(getattr(x, "kind", None) == DIRECT_KIND for x in downloads):
+            return "direct"
+        return "pan"
+    # error 为 None 或空串都算「没出错但也没链接」——与 gen() 里 `not d.error`
+    # 计 ok 的口径保持一致。
+    if not d.error:
+        return "no_links"
+    prefix = _error_prefix(d.error)
+    if prefix == "NEEDS_LOGIN":
+        # 搜索页级：搜索被重定向到登录页 == 根本没搜到，pipeline 会写
+        # extra["search_login_wall"]（值是登录页 URL）。
+        # 详情页级（隐藏内容门槛）不写这个键 → 属于「找到但没链接」。
+        if (getattr(d, "extra", None) or {}).get("search_login_wall"):
+            return "not_found"
+        return "no_links"
+    return "no_links" if prefix in NO_LINKS_PREFIXES else "not_found"
+
+
+def order_results(
+    results: list[GameDetail], tier_by_site: dict[str, str],
+) -> list[GameDetail]:
+    """按「链接质量 → 站点分级 → 原始顺序」排序，返回**新** list。
+
+    主键 direct < pan < no_links < not_found；次键 backup 站排在同档 primary 之后；
+    第三键用 enumerate 下标，保证同键项维持原相对顺序（sorted 本身稳定，加下标
+    是为了连「主键+次键都相同」的情形也钉死）。
+    """
+    def key(item: tuple[int, GameDetail]) -> tuple[int, int, int]:
+        idx, d = item
+        backup = 1 if tier_by_site.get(d.site_id) == "backup" else 0
+        return (OUTCOME_ORDER[outcome_of(d)], backup, idx)
+
+    return [d for _, d in sorted(enumerate(results), key=key)]
+
+
 def _run_pipeline(
     config: dict, sites: list[Site], query: str, root: Path,
     use_cache: bool = True,
@@ -50,7 +125,10 @@ def create_app() -> FastAPI:
             {"id": s.id, "name": s.name, "langs": sorted(s.langs),
              "mode": s.search.mode, "url_searchable": s.url_searchable,
              "needs_login": s.needs_login, "max_query_len": s.max_query_len,
-             "kinds": s.kinds}
+             "kinds": s.kinds,
+             # UI 用：卡片标题/跳转链接的兜底（NO_RESULTS 时 title/url 都是空的）
+             # 与「备用站」标签。既有字段一个都没动。
+             "homepage": s.homepage, "tier": s.tier}
             for s in all_sites
         ]
 
@@ -77,10 +155,16 @@ def create_app() -> FastAPI:
                 yield _sse("done", {"ok": 0, "total": len(part)})
                 return
             ok = 0
-            for d in results:
+            # _run_pipeline 先把整个 list 拿回来，之后才逐条发帧，
+            # 所以排序放后端是零成本的（不需要在 JS 里重排 DOM）。
+            tier_by_site = {s.id: s.tier for s in part}
+            for d in order_results(results, tier_by_site):
                 if not d.error:
                     ok += 1
-                yield _sse("result", asdict(d))
+                payload = asdict(d)
+                # 让 UI 按档上色/分组，而不必在 JS 里解析错误字串
+                payload["outcome"] = outcome_of(d)
+                yield _sse("result", payload)
             yield _sse("done", {"ok": ok, "total": len(results)})
 
         return StreamingResponse(gen(), media_type="text/event-stream")

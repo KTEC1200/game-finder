@@ -29,6 +29,7 @@
   main { padding:24px; display:grid; gap:14px;
          grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); }
   .card { background:var(--card); border:1px solid #23262e; border-radius:12px;
+          border-left:4px solid #23262e;
           padding:16px; display:flex; flex-direction:column; gap:10px; }
   .card h3 { margin:0; font-size:15px; }
   .card .meta { color:var(--dim); font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
@@ -45,6 +46,28 @@
   .badge { font-size:11px; padding:2px 7px; border-radius:99px;
            background:#222833; color:var(--dim); }
   .badge.warn { background:#3a2f1a; color:var(--warn); }
+
+  /* 结果分档：左色条 + badge。值与后端 outcome_of() 的返回值一一对应，
+     卡片顺序也由后端定（direct → pan → no_links → not_found）。 */
+  .card.outcome-direct    { border-left-color:var(--ok); }
+  .card.outcome-pan       { border-left-color:var(--accent); }
+  .card.outcome-no_links  { border-left-color:var(--warn); }
+  .card.outcome-not_found { border-left-color:var(--bad); }
+  .badge.direct    { background:#1f2f3a; color:#8fd0ff; }
+  .badge.pan       { background:#1f3a2b; color:#7ee2a8; }
+  .badge.no_links  { background:#3a2f1a; color:var(--warn); }
+  .badge.not_found { background:#3a1f22; color:var(--bad); }
+  .badge.backup    { background:#2a2f3a; color:#c9d3e0; }
+  /* 备用站覆盖较弱，淡化但仍可读 */
+  .card.backup { opacity:.68; }
+  .cardlink { color:var(--fg); text-decoration:none; }
+  .cardlink:hover { color:var(--accent); text-decoration:underline; }
+  .target { color:var(--dim); font-size:11px; word-break:break-all; }
+
+  .legend { padding:10px 24px; border-bottom:1px solid #23262e;
+            display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+            color:var(--dim); font-size:12px; }
+  .legend b { color:#c9d3e0; }
 </style>
 </head>
 <body>
@@ -61,6 +84,18 @@
   </div>
   <div class="hint" id="hint"></div>
 </header>
+<!-- 图例：纯常量文案，不拼任何站点返回的字符串 -->
+<div class="legend" id="legend">
+  <b>排序：</b>
+  <span class="badge direct">直链</span><span>有直链，优先</span>
+  <span>→</span>
+  <span class="badge pan">网盘</span><span>有网盘 / 磁力</span>
+  <span>→</span>
+  <span class="badge no_links">无下载</span><span>找到游戏但没链接</span>
+  <span>→</span>
+  <span class="badge not_found">未找到</span><span>站点没搜到</span>
+  <span class="badge backup">备用站</span><span>覆盖较弱，排在同档最后</span>
+</div>
 <main id="out"></main>
 
 <script>
@@ -73,6 +108,36 @@ const hint = document.getElementById('hint');
 
 const KIND_CLASS = { pan:'pan', magnet:'magnet', direct:'direct', unknown:'' };
 const LANG_NAME = { zh:'中文', en:'英文', ja:'日文' };
+
+// 后端 outcome_of() 的四档，卡片按它上色/分组，**不在 JS 里解析错误字串**。
+const OUTCOMES = ['direct', 'pan', 'no_links', 'not_found'];
+const OUTCOME_LABEL = { direct:'直链', pan:'网盘', no_links:'无下载', not_found:'未找到' };
+
+// site_id -> {name, homepage, tier}。启动时拉一次 /api/sites：
+// 站点名比 site_id 好读，homepage 是 title/url 为空时的跳转兜底。
+const SITES = {};
+const sitesReady = (async () => {
+  try {
+    const r = await fetch('/api/sites');
+    (await r.json()).forEach(s => {
+      SITES[s.id] = { name:s.name, homepage:s.homepage, tier:s.tier };
+    });
+  } catch (e) { /* 站点表拿不到就退回 site_id 显示，不阻塞搜索 */ }
+})();
+
+// 只接受 http(s)：这些 URL 来自站点返回的数据，不能让 javascript: 之类的东西
+// 变成可点的链接。不合法就返回 null（调用处于是不生成链接）。
+function safeUrl(u) {
+  if (typeof u !== 'string') return null;
+  const v = u.trim();
+  return /^https?:\/\//i.test(v) ? v : null;
+}
+
+// 卡片要跳去哪：优先详情页 URL，NO_RESULTS 时 url 是 null → 退回站点首页。
+function jumpTarget(d) {
+  const site = SITES[d.site_id] || {};
+  return safeUrl(d.url) || safeUrl(site.homepage);
+}
 
 // 一个站点都没有下载链接时给的换名建议。按**已识别语种**给例子：
 // 中文名搜不到是最常见的（中文只有 2/16 站出链，日文 8/11）。
@@ -99,20 +164,45 @@ function el(tag, cls, text) {
 }
 
 function renderCard(d) {
-  const c = el('div','card');
+  const site = SITES[d.site_id] || {};
+  const outcome = OUTCOMES.includes(d.outcome) ? d.outcome : 'not_found';
+  const c = el('div', 'card outcome-' + outcome + (site.tier === 'backup' ? ' backup' : ''));
   c.dataset.site = d.site_id;
+  c.dataset.outcome = outcome;
   if (d.cover_url) {
     const img = el('img','cover'); img.src = d.cover_url; img.loading='lazy';
     img.onerror = () => img.remove();
     c.appendChild(img);
   }
-  c.appendChild(el('h3', null, d.title || '（无标题）'));
+  // 标题：NO_RESULTS 实测是 title='' 且 url=None，所以要退回站点名 / site_id。
+  // 有可用 URL 时把标题做成链接（新分页打开，rel 挡住 referrer/opener）。
+  const title = el('h3');
+  const label = d.title || site.name || d.site_id;
+  const href = jumpTarget(d);
+  if (href) {
+    const a = el('a', 'cardlink', label);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = href;
+    title.appendChild(a);
+  } else {
+    title.textContent = label;
+  }
+  c.appendChild(title);
+
   const meta = el('div','meta');
-  meta.appendChild(el('span','badge', d.site_id));
+  meta.appendChild(el('span', 'badge ' + outcome, OUTCOME_LABEL[outcome]));
+  const siteName = el('span', null, site.name || d.site_id);
+  siteName.title = d.site_id;
+  meta.appendChild(siteName);
+  if (site.tier === 'backup') meta.appendChild(el('span','badge backup','备用站'));
   if (d.size)    meta.appendChild(el('span', null, d.size));
   if (d.version) meta.appendChild(el('span', null, d.version));
   if (d.updated_at) meta.appendChild(el('span', null, d.updated_at));
   c.appendChild(meta);
+  // 实际跳转目标用小字亮出来，方便「定位问题」时知道到底开了哪一页
+  if (href) c.appendChild(el('div','target', '跳转：' + href));
   if (d.intro) c.appendChild(el('div','intro', d.intro));
   if (d.error) c.appendChild(el('div','err', '失败：' + d.error));
 
@@ -136,6 +226,8 @@ async function search(refresh) {
   out.innerHTML = '';
   hint.style.display = 'none';
   langLine.textContent = refresh ? '搜索中…（已跳过缓存）' : '搜索中…';
+  // 站点名 / 首页兜底链接就绪后再渲染卡片（失败也已内部吞掉，不会卡住）
+  await sitesReady;
 
   const resp = await fetch('/api/search', {
     method:'POST',
