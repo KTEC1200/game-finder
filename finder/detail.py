@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import html as html_mod
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from .models import Download, GameDetail
 
@@ -46,6 +47,10 @@ ASSET_URL_RE = re.compile(
 #   /api/dl/{slug}/{base64url(真实URL)}
 # 解码后才是 rapidgator/pixeldrain 之类的真链（实测 2026-10-18）。
 GB_DL_RE = re.compile(r"https?://[^\s\"'<>\\]*/api/dl/([^/\s\"'<>\\]+)/([A-Za-z0-9_\-=]+)")
+
+# Zibll 主题的网盘跳板（nekogal 实测）：`/?golink=<base64url>&nonce=...`，
+# base64 解出来才是真网盘地址。跳板 URL 本身不能当下载链接（点它只是 302）。
+GOLINK_RE = re.compile(r"[?&]golink=([A-Za-z0-9_\-=]+)")
 
 # 整页 HTML 里抓 pan/magnet 链接。排除紧跟的引号/反斜杠，避免把 JSON 转义带进来。
 URL_RE = re.compile(
@@ -113,11 +118,45 @@ def _classify(url: str) -> str:
         return "magnet"
     if any(d in low for d in PAN_DOMAINS):
         return "pan"
+    # 站方自建网盘：主机名以 `pan.` 开头（nekogal 的 pan.nekogal.top/s/xxx 实测）。
+    # 通用规则，不必为每个站往 PAN_DOMAINS 里加一条。但**必须是分享路径**
+    # `/s/<id>`：同一主机下的 `/f/<file>.webp` 是封面图，不是下载。
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.startswith("pan.") and parsed.path.startswith("/s/"):
+        return "pan"
     if any(d in low for d in FILEHOST_DOMAINS):
         return "filehost"
     if re.search(r"/(download|dl|down|file)", low):
         return "direct"
     return "unknown"
+
+
+def decode_golink(html: str) -> list[str]:
+    """解 Zibll 主题的 `?golink=<base64url>` 跳板，拿到真网盘地址。
+
+    nekogal 实测（2026-10-18）：「资源下载」区每个按钮都是
+        /?golink=aHR0cHM6Ly9wYW4ubmVrb2dhbC50b3Avcy9rQVpIYQ==&nonce=...
+    base64 里才是 `https://pan.nekogal.top/s/kAZHa`。整页锚点扫描拿不到真链，
+    该站因此一直 NO_DOWNLOADS。解不出来就跳过（不猜）。
+    """
+    out: list[str] = []
+    for m in GOLINK_RE.finditer(html_mod.unescape(html)):
+        raw = m.group(1)
+        raw += "=" * (-len(raw) % 4)
+        try:
+            dec = base64.urlsafe_b64decode(raw).decode("utf-8", "replace")
+        except (ValueError, binascii.Error):
+            continue
+        dec = dec.strip()
+        if not dec.startswith("http"):
+            continue
+        # 「游戏官网」也用 golink 包装，但它是介绍页不是下载。只留可分类的地址。
+        if _classify(dec) == "unknown":
+            continue
+        if dec not in out:
+            out.append(dec)
+    return out
 
 
 def decode_gb_dl_links(html: str) -> list[str]:
@@ -239,6 +278,8 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
             continue  # gamebounty 跳板；真链由 decode_gb_dl_links 提供
         if ASSET_URL_RE.search(url):
             continue  # 图标/图片/样式等页面装饰，不是可下载的资源
+        if "golink=" in url:
+            continue  # Zibll 跳板；真链由 decode_golink 提供
         kind = _classify(url)
         if kind == "unknown":
             continue
@@ -255,6 +296,10 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
             seen[url] = Download(kind=_classify(url), url=url, label="二维码")
 
     for url in decode_gb_dl_links(html):
+        if url not in seen:
+            seen[url] = Download(kind=_classify(url), url=url, label="跳板解码")
+
+    for url in decode_golink(html):
         if url not in seen:
             seen[url] = Download(kind=_classify(url), url=url, label="跳板解码")
 

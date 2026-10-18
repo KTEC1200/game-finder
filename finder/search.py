@@ -29,7 +29,10 @@ from .models import SearchHit, Site
 NAV_RE = re.compile(
     r"/(login|register|signup|tag|tags|category|categor|page/\d+|about|contact|"
     r"privacy|terms|feed|rss|user|profile|search|wp-content|wp-admin|wp-json|"
-    r"wp-includes|assets|static|list|lists|forums?|thread|donations?|archives?|"
+    r"wp-includes|assets|static|list|lists|forums?|thread|donations?|"
+    # `/archives/category/…`、`/archives/tag/…`、`/archives/2026`（年份归档）
+    # 都是列表页；但 `/archives/67` 是文章详情页（nekogal 实测），不能一起剔。
+    r"archives?/(?:category|tag|author|date|page|\d{4}(?:/|$))|"
     r"board|boards)(/|$|\?)", re.I
 )
 # 终端段导航（`/game`、`/games`、`/index.php` 这类列表入口）。
