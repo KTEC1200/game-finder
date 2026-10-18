@@ -17,6 +17,7 @@
   button { padding:10px 18px; border-radius:8px; border:0;
     background:var(--accent); color:#04101f; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:#222833; color:var(--fg); font-weight:400; }
   .lang { margin-top:10px; color:var(--dim); font-size:13px; }
   .lang b { color:var(--accent); }
   .hint { margin-top:8px; padding:8px 12px; border-radius:8px;
@@ -48,8 +49,9 @@
   <div class="row">
     <input id="q" type="text" placeholder="输入游戏名（中文 / English / 日本語）" autofocus>
     <button id="go">搜索</button>
+    <button id="refresh" class="ghost" title="跳过缓存，重新抓一遍（站点刚更新时用）">强制刷新</button>
   </div>
-  <div class="lang" id="langLine">支持 22 个资源站 · 自动识别语种</div>
+  <div class="lang" id="langLine">支持 21 个资源站 · 自动识别语种</div>
   <div class="hint" id="hint">
     没找到？试试用<b>英文名</b>或<b>日文名</b>再搜一次。
   </div>
@@ -59,6 +61,7 @@
 <script>
 const out = document.getElementById('out');
 const goBtn = document.getElementById('go');
+const refreshBtn = document.getElementById('refresh');
 const input = document.getElementById('q');
 const langLine = document.getElementById('langLine');
 const hint = document.getElementById('hint');
@@ -103,22 +106,23 @@ function renderCard(d) {
   return c;
 }
 
-async function search() {
+async function search(refresh) {
   const query = input.value.trim();
   if (!query) return;
   goBtn.disabled = true;
+  refreshBtn.disabled = true;
   out.innerHTML = '';
   hint.style.display = 'none';
-  langLine.textContent = '搜索中…';
+  langLine.textContent = refresh ? '搜索中…（已跳过缓存）' : '搜索中…';
 
   const resp = await fetch('/api/search', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({query}),
+    body: JSON.stringify({query, refresh: !!refresh}),
   });
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', gotAny = false, lang = null;
+  let buf = '', gotAny = false, lang = null, cachedCount = 0;
 
   while (true) {
     const {value, done} = await reader.read();
@@ -140,6 +144,7 @@ async function search() {
           `参与 ${data.participating} 站 · 跳过 ${data.skipped.length} 站（不支持该语种）`;
       } else if (ev === 'result') {
         gotAny = true;
+        if (data.extra && data.extra.cached) cachedCount++;
         out.appendChild(renderCard(data));
       } else if (ev === 'error') {
         out.appendChild(renderCard({site_id:'system', title:'出错', error:data.message,
@@ -147,14 +152,18 @@ async function search() {
       } else if (ev === 'done') {
         if (!gotAny) hint.style.display = 'block';
         langLine.textContent += ` · 完成（成功 ${data.ok}/${data.total}）`;
+        // 命中缓存时明说，否则用户会以为「这么快是不是没真搜」
+        if (cachedCount) langLine.textContent += ` · ${cachedCount} 站来自缓存`;
       }
     }
   }
   goBtn.disabled = false;
+  refreshBtn.disabled = false;
 }
 
-goBtn.addEventListener('click', search);
-input.addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+goBtn.addEventListener('click', () => search(false));
+refreshBtn.addEventListener('click', () => search(true));
+input.addEventListener('keydown', e => { if (e.key === 'Enter') search(false); });
 </script>
 </body>
 </html>
