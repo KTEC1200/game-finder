@@ -91,6 +91,12 @@ NO_RESULTS_MARKERS = (
     "暂无游戏收录",
     "0 個資源",
     "0 个资源",
+    #   gamebounty → "没有关于“千恋万花”的结果"（2026-10-18 实测；英文界面
+    #   时是 "No results for ..."）。少了它，空结果会掉进
+    #   "NO_RESULTS: pick_best returned None"，看不出是站点真的没有。
+    "没有关于",
+    "没有相關",
+    "no results for",
 )
 
 
