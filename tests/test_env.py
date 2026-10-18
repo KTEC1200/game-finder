@@ -17,7 +17,6 @@ def test_config_yaml_has_required_keys():
     assert Path(cfg["browser"]["chrome_path"]).exists()
     assert cfg["search"]["timeout_ms"] > 0
     assert cfg["cache"]["ttl_hours"] > 0
-    assert set(cfg["health"]["probe_words"]) == {"zh", "en", "ja"}
 
 
 def test_playwright_importable():

@@ -10,9 +10,10 @@ def sites():
     return load_sites(PROJECT / "sites.yaml")
 
 
-def test_loads_all_21_sites(sites):
-    """zi0 因实测无站内搜索被移出注册表（2026-10-18）。"""
-    assert len(sites) == 21
+def test_loads_all_19_sites(sites):
+    """zi0 因实测无站内搜索被移出；nysoure / lzacg 因 Cloudflare 全站拦截被移出
+    （2026-10-18）。"""
+    assert len(sites) == 19
 
 
 def test_ids_are_unique(sites):
@@ -30,7 +31,7 @@ def test_mode_counts_match_spec(sites):
     url = [s for s in sites if s.search.mode == "url"]
     form = [s for s in sites if s.search.mode == "form"]
     index = [s for s in sites if s.search.mode == "index"]
-    assert len(url) == 19, f"expected 19 url-mode, got {len(url)}: {[s.id for s in url]}"
+    assert len(url) == 17, f"expected 17 url-mode, got {len(url)}: {[s.id for s in url]}"
     assert len(form) == 1, f"expected 1 form-mode, got {len(form)}: {[s.id for s in form]}"
     assert len(index) == 1, f"expected 1 index-mode, got {len(index)}: {[s.id for s in index]}"
     assert {s.id for s in form} == {"touchgal"}
@@ -57,8 +58,8 @@ def test_langs_are_valid(sites):
 
 
 def test_language_coverage_counts(sites):
-    """移出 zi0 后的实测覆盖：zh=16 / en=17 / ja=11（总 21）。"""
-    for lang, expected in (("zh", 16), ("en", 17), ("ja", 11)):
+    """移出 zi0 / nysoure / lzacg 后的实测覆盖：zh=14 / en=16 / ja=10（总 19）。"""
+    for lang, expected in (("zh", 14), ("en", 16), ("ja", 10)):
         got = sum(1 for s in sites if lang in s.langs)
         assert got == expected, f"{lang}: expected {expected}, got {got}"
 
@@ -73,7 +74,7 @@ def test_known_specials(sites):
 def test_filter_by_lang_returns_participating_and_skipped(sites):
     from finder.sites import filter_sites_by_lang
     part, skipped = filter_sites_by_lang(sites, "ja")
-    assert len(part) == 11
-    assert len(part) + len(skipped) == 21
+    assert len(part) == 10
+    assert len(part) + len(skipped) == 19
     assert all("ja" in s.langs for s in part)
     assert all("ja" not in s.langs for s in skipped)

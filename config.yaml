@@ -24,14 +24,6 @@ search:
 cache:
   ttl_hours: 12
 
-health:
-  interval_hours: 6
-  start_delay_s: 60
-  probe_words:
-    zh: "终焉之莉莉"
-    en: "enderlilies"
-    ja: "制服カノジョ"
-
 server:
   host: "127.0.0.1"
   port: 8734

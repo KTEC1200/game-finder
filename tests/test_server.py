@@ -19,11 +19,11 @@ def client(monkeypatch):
     return TestClient(srv.create_app())
 
 
-def test_sites_endpoint_lists_21(client):
+def test_sites_endpoint_lists_19(client):
     r = client.get("/api/sites")
     assert r.status_code == 200
     data = r.json()
-    assert len(data) == 21
+    assert len(data) == 19
     assert {"id", "name", "langs", "mode"} <= set(data[0])
 
 
@@ -38,15 +38,9 @@ def test_search_streams_start_result_done(client):
 
 
 def test_search_lang_routing_counts(client):
-    """zh 输入应报告 16 个参与站点（移出 zi0 后）。"""
+    """zh 输入应报告 14 个参与站点（移出 zi0 / nysoure / lzacg 后）。"""
     with client.stream("POST", "/api/search", json={"query": "终焉之莉莉"}) as r:
         body = "".join(r.iter_text())
     import re
     m = re.search(r'"participating":\s*(\d+)', body)
-    assert m and int(m.group(1)) == 16
-
-
-def test_health_endpoint_shape(client):
-    r = client.get("/api/health")
-    assert r.status_code == 200
-    assert isinstance(r.json(), dict)
+    assert m and int(m.group(1)) == 14

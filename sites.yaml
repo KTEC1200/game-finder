@@ -40,6 +40,8 @@ sites:
     homepage: "https://www.gamer520.com/"
     kinds: [网盘]
     langs: [zh, en]
+    # 备用站：实测中文能出结果，但站内搜索对英文/日文查询基本无效。
+    tier: backup
     search:
       mode: url
       url_template: "https://www.gamer520.com/?s={q}"
@@ -77,9 +79,11 @@ sites:
       mode: url
       url_template: "https://www.flysheep6.com/?s={q}"
 
-  # ===== Galgame（15）=====
+  # ===== Galgame（13）=====
   # zi0（梓澪的妙妙屋）已移除：实测首页 5 个 input 全不可见，Control+k 唤不出，
   # 全站唯一的搜索入口是外链 https://www.searchgal.top → 不可站内搜索。
+  # nysoure / lzacg 已移除（2026-10-18）：全站被 Cloudflare 拦截
+  # （cf-error-details / attention required），探测必然失败，属基础设施问题。
   - id: sayafx
     name: 月谣
     homepage: "https://www.sayafx.vip/"
@@ -102,15 +106,6 @@ sites:
       mode: url
       url_template: "https://sukebei.nyaa.si/?f=0&c=1_3&q={q}"
 
-  - id: nysoure
-    name: Nysoure
-    homepage: "https://nysoure.com/"
-    kinds: [直链]
-    langs: [zh, en, ja]
-    search:
-      mode: url
-      url_template: "https://nysoure.com/search?keyword={q}&sort=8"
-
   - id: iacg
     name: 爱之列车
     homepage: "https://iacg.love/"
@@ -131,15 +126,6 @@ sites:
       # 资源条目默认折叠，点「下载资源」向 getdownload API 要真实直链；
       # 部分作品页面里本来就带网盘链（实测 千恋万花 有 xunlei 网盘）。
       download_flow: inarigal
-
-  - id: lzacg
-    name: 量子 ACG
-    homepage: "https://lzacg.cc/"
-    kinds: [直链]
-    langs: [zh]
-    search:
-      mode: url
-      url_template: "https://lzacg.cc/?s={q}"
 
   - id: acggw
     name: ACG 港湾

@@ -9,6 +9,23 @@ from .models import SearchSpec, Site
 
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "sites.yaml"
 
+VALID_TIERS = ("primary", "backup")
+
+
+def _parse_tier(raw: dict, site_id: str, path: Path) -> str:
+    """解析 tier，缺省 primary；非法值直接报错而不是静默降级。
+
+    静默回退会让 sites.yaml 里的拼写错误（tier: backu）无声生效，排查成本
+    远高于启动即失败 —— 注册表是人工维护的，错了就要立刻说。
+    """
+    tier = raw.get("tier", "primary")
+    if tier not in VALID_TIERS:
+        raise ValueError(
+            f"{path}: site '{site_id}' 的 tier 非法：{tier!r}"
+            f"（只能是 {' 或 '.join(VALID_TIERS)}）"
+        )
+    return tier
+
 
 def load_sites(path: Path | str | None = None) -> list[Site]:
     p = Path(path) if path else DEFAULT_PATH
@@ -46,6 +63,7 @@ def load_sites(path: Path | str | None = None) -> list[Site]:
                 max_query_len=item.get("max_query_len"),
                 adapter_status=item.get("adapter_status", "untested"),
                 force_headful=bool(item.get("force_headful", False)),
+                tier=_parse_tier(item, item["id"], p),
             )
         )
     return out

@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from ..lang import detect_lang
 from ..models import GameDetail, Site
 from ..sites import filter_sites_by_lang, load_sites
-from ..store import Store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
@@ -85,14 +84,6 @@ def create_app() -> FastAPI:
             yield _sse("done", {"ok": ok, "total": len(results)})
 
         return StreamingResponse(gen(), media_type="text/event-stream")
-
-    @app.get("/api/health")
-    def health():
-        db = ROOT / "data" / "finder.db"
-        if not db.exists():
-            return {}
-        with Store(db, CONFIG["cache"]["ttl_hours"]) as st:
-            return {k: asdict(v) for k, v in st.health_latest().items()}
 
     static = Path(__file__).resolve().parent / "static"
     if static.exists():

@@ -57,6 +57,9 @@ class Site:
     adapter_status: AdapterStatus = "untested"
     # 仅当 headless+真实UA 仍被 Cloudflare 拦时置 True，该站改用 headful
     force_headful: bool = False
+    # 站点分级："primary"（主力站）/ "backup"（备用站）。
+    # 缺省 primary：注册表里绝大多数站是主力，只有实测覆盖明显更弱的站显式降级。
+    tier: str = "primary"
 
 
 @dataclass
@@ -88,12 +91,3 @@ class GameDetail:
     downloads: list[Download] = field(default_factory=list)
     error: str | None = None
     extra: dict = field(default_factory=dict)
-
-
-@dataclass
-class HealthRecord:
-    site_id: str
-    status: str                  # ok / degraded / unreachable / needs_proxy / ...
-    latency_ms: int = 0
-    reason: str = ""
-    checked_at: str = ""         # ISO8601

@@ -1,6 +1,7 @@
+import sqlite3
 import time
 
-from finder.models import Download, GameDetail, HealthRecord
+from finder.models import Download, GameDetail
 from finder.store import Store
 
 
@@ -30,17 +31,6 @@ def test_expired_cache_returns_none(tmp_path):
         assert st.get_cached("q", "s") is None
 
 
-def test_health_record_and_latest(tmp_path):
-    with Store(tmp_path / "t.db", ttl_hours=12) as st:
-        st.record_health(HealthRecord(site_id="a", status="ok", latency_ms=100,
-                                      checked_at="2026-10-17T00:00:00"))
-        st.record_health(HealthRecord(site_id="a", status="degraded", latency_ms=200,
-                                      checked_at="2026-10-17T01:00:00"))
-        latest = st.health_latest()
-    assert latest["a"].status == "degraded"   # 取最新
-    assert latest["a"].latency_ms == 200
-
-
 def test_extra_dict_roundtrips(tmp_path):
     with Store(tmp_path / "t.db", ttl_hours=12) as st:
         d = GameDetail(
@@ -53,14 +43,16 @@ def test_extra_dict_roundtrips(tmp_path):
     assert got.extra == {"truncated": True, "query_used": "abc", "match": "weak", "hits": 3}
 
 
-def test_health_latest_one_record_per_site_even_on_ties(tmp_path):
-    with Store(tmp_path / "t.db", ttl_hours=12) as st:
-        st.record_health(HealthRecord(site_id="a", status="ok", latency_ms=10,
-                                      checked_at="2026-10-17T00:00:00"))
-        st.record_health(HealthRecord(site_id="a", status="degraded", latency_ms=20,
-                                      checked_at="2026-10-17T00:00:00"))
-        st.record_health(HealthRecord(site_id="b", status="ok", latency_ms=30,
-                                      checked_at="2026-10-17T02:00:00"))
-        latest = st.health_latest()
-    assert set(latest) == {"a", "b"}
-    assert latest["b"].latency_ms == 30
+def test_schema_no_longer_creates_health_history(tmp_path):
+    """健康巡检已整体拆除：建表脚本里不能再有 health_history。"""
+    db = tmp_path / "t.db"
+    with Store(db, ttl_hours=12):
+        pass
+    con = sqlite3.connect(str(db))
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        con.close()
+    assert "health_history" not in tables
+    assert "search_cache" in tables

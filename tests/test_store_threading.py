@@ -9,7 +9,7 @@
 """
 import threading
 
-from finder.models import Download, GameDetail, HealthRecord
+from finder.models import Download, GameDetail
 from finder.store import Store
 
 
@@ -74,24 +74,3 @@ def test_concurrent_writes_do_not_lose_rows(tmp_path):
         assert not err, f"并发写失败：{err}"
         got = [st.get_cached("q", s) for s in sites]
     assert all(g is not None for g in got), "有行被并发写丢掉了"
-
-
-def test_health_works_from_another_thread(tmp_path):
-    with Store(tmp_path / "c.db", ttl_hours=12) as st:
-        st.record_health(HealthRecord(site_id="a", status="ok", latency_ms=1,
-                                      checked_at="2026-10-18T00:00:00"))
-        err: list = []
-        out: list = []
-
-        def read():
-            try:
-                out.append(st.health_latest())
-            except BaseException as exc:  # noqa: BLE001
-                err.append(exc)
-
-        t = threading.Thread(target=read)
-        t.start()
-        t.join(timeout=10)
-
-    assert not err, f"跨线程读健康历史失败：{err}"
-    assert out[0]["a"].status == "ok"

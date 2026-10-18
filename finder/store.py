@@ -1,4 +1,4 @@
-"""SQLite 缓存与健康历史。纯标准库，无 ORM。"""
+"""SQLite 搜索缓存。纯标准库，无 ORM。"""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .models import Download, GameDetail, HealthRecord
+from .models import Download, GameDetail
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS search_cache (
@@ -18,14 +18,6 @@ CREATE TABLE IF NOT EXISTS search_cache (
     created_at TEXT NOT NULL,
     PRIMARY KEY (query_norm, site_id)
 );
-CREATE TABLE IF NOT EXISTS health_history (
-    site_id    TEXT NOT NULL,
-    status     TEXT NOT NULL,
-    latency_ms INTEGER NOT NULL,
-    reason     TEXT NOT NULL,
-    checked_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_health_site ON health_history(site_id, checked_at);
 """
 
 # dataclass 字段名集合：用于丢弃 payload 里未来版本才有的键，避免 GameDetail(**data) 炸掉
@@ -38,7 +30,7 @@ def _now() -> datetime:
 
 
 class Store:
-    """search_cache（带 TTL）+ health_history 的薄封装，可作上下文管理器。
+    """search_cache（带 TTL）的薄封装，可作上下文管理器。
 
     线程安全：sqlite3 默认禁止跨线程使用连接（`check_same_thread=True`），
     而 pipeline 的并发路径会在 worker 线程里读写缓存 —— 实测直接抛
@@ -118,29 +110,3 @@ class Store:
             return GameDetail(**{k: v for k, v in data.items() if k in _DETAIL_KEYS})
         except (TypeError, AttributeError):
             return None
-
-    def record_health(self, rec: HealthRecord) -> None:
-        with self._lock:
-            self._con.execute(
-                "INSERT INTO health_history VALUES (?,?,?,?,?)",
-                (rec.site_id, rec.status, rec.latency_ms, rec.reason, rec.checked_at),
-            )
-            self._con.commit()
-
-    def health_latest(self) -> dict[str, HealthRecord]:
-        # ORDER BY checked_at DESC + rowid DESC 兜住同一时间戳：后插入者胜，
-        # 再用 dict 覆盖保证每站只留一条（自连接 MAX 遇并列会出重复行）。
-        with self._lock:
-            rows = self._con.execute(
-                """SELECT site_id, status, latency_ms, reason, checked_at
-                   FROM health_history
-                   ORDER BY checked_at DESC, rowid DESC"""
-            ).fetchall()
-        latest: dict[str, HealthRecord] = {}
-        for site_id, status, latency_ms, reason, checked_at in rows:
-            latest.setdefault(
-                site_id,
-                HealthRecord(site_id=site_id, status=status, latency_ms=latency_ms,
-                             reason=reason, checked_at=checked_at),
-            )
-        return latest
