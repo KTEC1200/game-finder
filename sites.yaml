@@ -123,11 +123,14 @@ sites:
   - id: inarigal
     name: 稻荷 GAL
     homepage: "https://inarigal.com/"
-    kinds: [直链]
+    kinds: [直链, 网盘]
     langs: [zh, ja]
     search:
       mode: url
       url_template: "https://inarigal.com/?search={q}"
+      # 资源条目默认折叠，点「下载资源」向 getdownload API 要真实直链；
+      # 部分作品页面里本来就带网盘链（实测 千恋万花 有 xunlei 网盘）。
+      download_flow: inarigal
 
   - id: lzacg
     name: 量子 ACG

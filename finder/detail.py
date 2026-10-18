@@ -44,6 +44,16 @@ ASSET_URL_RE = re.compile(
     re.I,
 )
 
+# 广告/客户端安装包：**不是游戏本体**，出现时绝不能算下载。
+# jidiyouxi 实测：详情页 appState 里带迅雷游戏助手安装包
+#   https://bj-file-xlas-down-al-game.xunlei.com/winapp/installer/Installer-1.13.0-release-100010.exe
+# 它曾经被当成 direct 混进下载列表（测试 fixture 的 21 条里第 21 条）。
+AD_URL_RE = re.compile(
+    r"xunlei\.com/winapp/installer/|/installer/[^/]*installer[^/]*\.exe"
+    r"|/winapp/[^?#]*\.exe",
+    re.I,
+)
+
 # gamebounty 的下载按钮不指向文件主机本身，而是同源跳板：
 #   /api/dl/{slug}/{base64url(真实URL)}
 # 解码后才是 rapidgator/pixeldrain 之类的真链（实测 2026-10-18）。
@@ -129,6 +139,13 @@ def _classify(url: str) -> str:
     if any(d in low for d in FILEHOST_DOMAINS):
         return "filehost"
     if re.search(r"/(download|dl|down|file)", low):
+        return "direct"
+    # 路径本身就是个文件（带扩展名），例如 inarigal 的
+    # `https://annnnnnn.soraflie.top/old/PC/%E5%88%B6%E6%9C%8D%E5%A5%B3%E5%8F%8B.rar?Authorization=...`
+    # —— 站点把直链放在自家对象存储上，URL 里没有 download 之类的词。
+    # 只认压缩包/镜像/可执行这三类「一定是下载物」的扩展名，
+    # 避免把 .html/.php 详情页判成下载（`.webp` 封面同理已由 ASSET_URL_RE 挡掉）。
+    if re.search(r"\.(?:rar|zip|7z|tar|gz|xz|iso|bin|img|apk|exe|msi|dmg)$", parsed.path, re.I):
         return "direct"
     return "unknown"
 
@@ -354,6 +371,8 @@ def extract_downloads(html: str, page_url: str) -> list[Download]:
             continue  # gamebounty 跳板；真链由 decode_gb_dl_links 提供
         if ASSET_URL_RE.search(url):
             continue  # 图标/图片/样式等页面装饰，不是可下载的资源
+        if AD_URL_RE.search(url):
+            continue  # 客户端安装包等广告，不是游戏本体
         if "golink=" in url:
             continue  # Zibll 跳板；真链由 decode_golink 提供
         kind = _classify(url)

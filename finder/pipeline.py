@@ -33,6 +33,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from .detail import (
+    _classify,
     build_magnet_from_torrent,
     build_magnet_url,
     extract_card,
@@ -41,12 +42,15 @@ from .detail import (
 from .lang import CJK_RE, KANA_RE
 from .models import Download, GameDetail, SearchHit, Site
 from .search import (
+    DETAILISH_RE,
+    SLUG_DETAIL_RE,
     _norm,
     build_search_url,
     clamp_query,
     parse_result_links,
     pick_best,
 )
+from urllib.parse import urlparse
 
 SEARCH_TIMEOUT = 45000
 DETAIL_TIMEOUT = 45000
@@ -371,6 +375,22 @@ RETRYABLE_NAV = (
 )
 
 
+def _looks_detail_page(site: Site, url: str) -> bool:
+    """当前 URL 是不是「详情页形状」——用于识别「搜索即跳详情」的站点。
+
+    只判路径形状，不看正文：正文判断在 _extract_detail 里已有内容证据闸门，
+    这里的作用只是决定「不要因为没解析出列表就放弃」。
+    """
+    try:
+        parsed = urlparse(url or "")
+    except Exception:  # noqa: BLE001
+        return False
+    if not parsed.path or parsed.path in ("", "/"):
+        return False
+    bare = parsed.path
+    return bool(DETAILISH_RE.search(bare) or SLUG_DETAIL_RE.search(bare))
+
+
 def _goto(page, url: str, timeout: int, retries: int = 0) -> tuple[int | None, str | None]:
     """导航到 url。返回 (http_status, nav_error)；nav_error 不为 None 时页面可能是残页。
 
@@ -663,6 +683,16 @@ def search_one(
     # 只有「解析出候选」才是硬证据。标记仍然写进 extra 供排查。
     no_results = marker if best is None else None
 
+    # 搜索即跳详情页：部分站点在结果唯一时直接把 /search 302 到详情页
+    # （inarigal 实测 `?search=千恋万花` → `/detail/64`）。此时页面上没有
+    # 结果列表可解析，但**已经站在正确的详情页上** —— 把它当成「没有候选」
+    # 会白白丢掉一个完全可用的结果。
+    direct_detail = best is None and not no_results and not search_block and _looks_detail_page(
+        site, search_url
+    )
+    if direct_detail:
+        extra["search_redirected_to_detail"] = search_url
+
     extra.update(
         {
             "hits": len(hits),
@@ -710,6 +740,9 @@ def search_one(
             extra=extra,
         )
     if best is None:
+        if direct_detail:
+            # 已经站在详情页上，跳过再导航一次（避免无谓请求与限流）
+            return _extract_detail(page, site, q, search_url, timeout_ms, extra, already_open=True)
         if nav_error:
             error = f"SEARCH_NAV_FAILED: {nav_error}"
         elif status is not None and status >= 400:
@@ -728,10 +761,18 @@ def _extract_detail(
     target_url: str,
     timeout_ms: int,
     extra: dict[str, Any],
+    already_open: bool = False,
 ) -> GameDetail:
-    """进详情页并抽卡 + 内容证据闸门。url/form/index 三种模式共用这一段。"""
-    d_status, d_nav_error = _goto(page, target_url, timeout_ms, retries=2)
-    _settle(page)
+    """进详情页并抽卡 + 内容证据闸门。url/form/index 三种模式共用这一段。
+
+    `already_open=True` 表示页面**已经停在** target_url 上（搜索被站点直接
+    302 到详情页的情形），不需要再导航一次。
+    """
+    if already_open:
+        d_status, d_nav_error = extra.get("search_status"), None
+    else:
+        d_status, d_nav_error = _goto(page, target_url, timeout_ms, retries=2)
+        _settle(page)
     detail_url = page.url
     detail_html = page.content()
     detail_block = looks_blocked(_page_title(page), detail_html)
@@ -797,6 +838,10 @@ def _extract_detail(
             )
         elif site.search.download_flow == "ankergames":
             card.downloads = _fetch_ankergames_link(
+                page, site, timeout_ms, extra
+            )
+        elif site.search.download_flow == "inarigal":
+            card.downloads = _fetch_inarigal_links(
                 page, site, timeout_ms, extra
             )
         if site.search.torrent_selector:
@@ -954,6 +999,88 @@ def _fetch_torrent_magnets(
         extra.setdefault("torrent_errors", []).append("parse: no-info-hash")
         return []
     return [Download(kind="magnet", url=magnet, label="种子")]
+
+
+def _fetch_inarigal_links(
+    page, site: Site, timeout_ms: int, extra: dict[str, Any]
+) -> list[Download]:
+    """inarigal：资源条目默认折叠，点「下载资源」才向 API 要真实直链。
+
+    实测流程 2026-10-18（`/detail/684` 制服女友）：
+      1. 详情页每个资源是一个 `.resource-item[data-resource-id]`，正文
+         `.resource-content` 是 `display:none`，要先点 `.resource-header` 展开；
+      2. 展开后有 `button.download-btn`，点它触发
+         `GET https://api.<cdn>/api/getdownload/<resource_id>?format=json`
+         → `{"success":true,"url":"https://.../xxx.rar?Authorization=..."}`
+      3. 那条 `url` 就是可下载的直链（带一次性 Authorization 参数）。
+
+    必须**靠点击 + 监听 response**，不能自己拼 API 域名：API 是
+    `api.gscsm.com.cname1541.yjs-cdn.com` 这种 CDN cname，会轮换；
+    页面内 fetch 也试过，跨域被拒（`TypeError: Failed to fetch`）。
+    取不到就写 extra 错误，绝不猜链接。
+    """
+    errs: list[str] = []
+    captured: list[str] = []
+    host_filter = "getdownload"
+
+    def _on_response(resp) -> None:
+        try:
+            if host_filter not in resp.url:
+                return
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            return
+        url = (body or {}).get("url") if isinstance(body, dict) else None
+        if url:
+            captured.append(url)
+
+    page.on("response", _on_response)
+    try:
+        items = page.locator(".resource-item")
+        try:
+            n_items = items.count()
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"items: {type(exc).__name__}")
+            n_items = 0
+        extra["inarigal_resource_items"] = n_items
+        for idx in range(min(n_items, 6)):   # 一个游戏通常 1–4 条资源
+            item = items.nth(idx)
+            try:
+                header = item.locator(".resource-header").first
+                if header.count():
+                    header.click(timeout=8000)
+                    page.wait_for_timeout(700)
+                btn = item.locator("button.download-btn").first
+                if not btn.count():
+                    errs.append(f"item{idx}: no-button")
+                    continue
+                before = len(captured)
+                btn.click(timeout=8000)
+                for _ in range(20):           # 等接口回来，最多 ~4s
+                    if len(captured) > before:
+                        break
+                    page.wait_for_timeout(200)
+                if len(captured) == before:
+                    errs.append(f"item{idx}: no-url")
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"item{idx}: {type(exc).__name__}")
+                continue
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if errs:
+        extra["inarigal_errors"] = errs
+    out: list[Download] = []
+    seen: set[str] = set()
+    for url in captured:
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(Download(kind=_classify(url), url=url, label="资源直链"))
+    return out
 
 
 def _fetch_ankergames_link(
