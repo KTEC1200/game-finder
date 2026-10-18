@@ -688,20 +688,25 @@ def search_one(
             html_now = page.content()
             # **已经有候选就不许重载**。`_TRANSIENT_TEXT_MIN` 是按「正文至少
             # 300 字」猜的，而 jidiyouxi 是 JS 渲染页：出结果时 `_visible_text`
-            # 也只有 250 字 → 被误判成暂态 → 把**已经拿到的结果重载冲掉**，
-            # 重载又要重新碰站点的随机空响应。实测（2026-10-18）这条路让同一个
-            # 查询 3 次里只成功 1 次；而单纯轮询页面时 4 秒就有 hits=1。
+            # 也只有 250 字 → 会被误判成暂态 → 重载把**已经拿到的结果冲掉**，
+            # 还要重新碰站点的随机空响应（实测 3 次里只成功 1 次）。
             # 「解析出候选」是硬证据 —— 跟「候选覆盖无结果标记」同一条原则。
             if parse_result_links(html_now, page.url, site):
                 break
             if not _looks_transient(html_now):
                 break
+            # 先给它时间自己渲染，再决定要不要重载：这一页永远「短」，
+            # 光看 `_looks_transient` 会一直判暂态。等待后必须**重查候选**，
+            # 否则等于每轮都无条件重载（这也是抖动的主要来源）。
+            _settle(page, 4000)
+            if parse_result_links(page.content(), page.url, site):
+                break
+            if not _looks_transient(page.content()):
+                break
             extra.setdefault("search_transient_retries", 0)
             extra["search_transient_retries"] += 1
+            _goto(page, url, timeout_ms)
             _settle(page, 4000)
-            if _looks_transient(page.content()):
-                _goto(page, url, timeout_ms)
-                _settle(page, 4000)
     else:
         start_url = site.search.form_url or site.homepage
         status, nav_error = _goto(page, start_url, timeout_ms)

@@ -41,8 +41,11 @@ class _Resp:
 
 
 class _Page:
-    def __init__(self, html: str):
-        self._html = html
+    """`html_seq` 给多个快照时，每次 `content()` 依次前进（模拟 JS 渲染）。"""
+
+    def __init__(self, html):
+        self._seq = [html] if isinstance(html, str) else list(html)
+        self._i = 0
         self.url = ""
         self.gotos: list[str] = []
 
@@ -55,7 +58,9 @@ class _Page:
         return None
 
     def content(self):
-        return self._html
+        html = self._seq[min(self._i, len(self._seq) - 1)]
+        self._i += 1
+        return html
 
     def title(self):
         return "玩游戏来机地"
@@ -96,3 +101,22 @@ def test_a_broken_empty_page_is_still_retried(_no_wait, monkeypatch):
     card = search_one(page, SITES["jidiyouxi"], "终焉之莉莉")
     assert len(page.gotos) > 1, "空壳页面应当重试导航"
     assert card.error is not None and card.error.startswith("NO_RESULTS")
+
+
+def test_waiting_for_the_page_to_render_does_not_trigger_a_reload(_no_wait, monkeypatch):
+    """等待后渲染出结果 → 也不许重载。
+
+    这是真站抖动的主因：页面**永远**只有 250 字（`_looks_transient` 恒为
+    True），如果等待之后不再查一次候选，就会每轮无条件重载，把刚渲染好的
+    结果冲掉。这里模拟「第 1 个快照空、第 2 个快照有结果」。
+    """
+    monkeypatch.setattr(
+        "finder.pipeline._extract_detail",
+        lambda page, site, q, detail_url, timeout_ms, extra: GameDetail(
+            site_id=site.id, url=detail_url, title="终焉之莉莉：骑士寂夜"
+        ),
+    )
+    page = _Page([BROKEN_HTML, HIT_HTML])
+    card = search_one(page, SITES["jidiyouxi"], "终焉之莉莉")
+    assert len(page.gotos) == 1, page.gotos
+    assert card.error is None and card.url.endswith("/topic/detail/959615543")
