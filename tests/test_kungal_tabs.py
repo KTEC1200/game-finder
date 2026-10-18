@@ -150,7 +150,8 @@ def test_reveal_does_not_invent_links_when_tab_reveals_nothing():
     )
     if card is not None:
         assert card.downloads == []
-        assert card.error == "NO_DOWNLOADS"
+        # 文案是「暂无」→ 归到「站点自己标注内容不可用」，比裸 NO_DOWNLOADS 更准确
+        assert card.error and card.error.startswith("NO_DOWNLOADS")
 
 
 def test_site_with_follow_pattern_still_navigates():

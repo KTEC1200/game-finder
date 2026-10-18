@@ -858,8 +858,59 @@ def _extract_detail(
             # 而落地页标题与 post 对不上（可能按登录态/推荐位分流），
             # 自动跟进有把「别的游戏」的网盘链接挂到本结果上的风险。只记录证据。
             card.extra["gate_links"] = _find_gate_links(detail_html, detail_url)
-            card.error = "NO_DOWNLOADS"
+            card.error = _classify_empty_detail(detail_html)
     return card
+
+
+# 「没抽到下载链接」的三种真实原因，必须分开报 —— 都写 NO_DOWNLOADS 会让
+# 「需要登录/需要评论」「站点自己说已下架」和「适配器坏了」混成一团。
+#
+# iacg 实测（2026-10-18，`https://iacg.love/56681.html`）：正文里有
+#   「此处内容已隐藏，请评论后刷新页面查看.」
+# 而页面另外写着「请登录后查看评论内容」——即必须先登录、再评论，才看得到隐藏
+# 内容。这类站点报 NO_DOWNLOADS 是误导，用户会以为真的没资源。
+GATED_LOGIN_MARKERS = (
+    "请登录后查看",
+    "请登录后发表评论",
+    "登录后查看",
+    "登录后可见",
+    "login to view",
+    "log in to view",
+    "sign in to view",
+    "you must be logged in",
+)
+GATED_COMMENT_MARKERS = (
+    "评论后刷新页面查看",
+    "回复后刷新页面查看",
+    "评论后可见",
+    "回复后可见",
+    "此处内容已隐藏",
+    "reply to see",
+    "comment to view",
+)
+GATED_CLOSED_MARKERS = (
+    "资源已失效",
+    "资源已下架",
+    "链接已失效",
+    "内容已删除",
+    "暫無",
+    "暂无",
+    "this file has been removed",
+)
+
+
+def _classify_empty_detail(html: str) -> str:
+    """详情页抽不到下载时，给出具体原因而不是一律 NO_DOWNLOADS。"""
+    blob = _SPACEY_RE.sub(" ", _visible_text(html or "")).lower()
+    if any(m in blob for m in GATED_COMMENT_MARKERS):
+        if any(m in blob for m in GATED_LOGIN_MARKERS):
+            return "NEEDS_LOGIN: 需登录并评论后才显示下载（该站隐藏内容门槛）"
+        return "NEEDS_COMMENT: 需先评论后才显示下载（该站隐藏内容门槛）"
+    if any(m in blob for m in GATED_LOGIN_MARKERS):
+        return "NEEDS_LOGIN: 页面要求登录后才显示下载"
+    if any(m in blob for m in GATED_CLOSED_MARKERS):
+        return "NO_DOWNLOADS: 站点自己标注内容不可用"
+    return "NO_DOWNLOADS"
 
 
 def _fetch_ggbases_magnets(
@@ -1251,7 +1302,7 @@ def _follow_detail_gate(
         card = extract_card(html_now, detail_url, site.id)
         card.extra.update(extra)
         if not card.downloads:
-            card.error = "NO_DOWNLOADS"
+            card.error = _classify_empty_detail(html_now)
         return card
 
     rx = re.compile(pattern)
@@ -1293,7 +1344,7 @@ def _follow_detail_gate(
     card = extract_card(html2, final_url, site.id)
     card.extra.update(extra)
     if not card.downloads:
-        card.error = "NO_DOWNLOADS"
+        card.error = _classify_empty_detail(html2)
     return card
 
 
