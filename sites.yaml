@@ -192,9 +192,16 @@ sites:
     homepage: "https://www.kungal.com/"
     kinds: [论坛网盘]
     langs: [zh, en, ja]
+    # 实测 2026-10-18：详情页 /galgame/{id} 是 SPA 标签页
+    # （游戏介绍 / 本体资源下载 / 补丁资源下载 / 评论区），默认停在「游戏介绍」，
+    # 正文一条网盘链都没有；点「本体资源下载」后**同页**渲染出资源列表
+    # （百度 40 / 夸克 32 / 移动云盘 11 / 123云盘 3 / 迅雷 12 / 其他 23），
+    # 每条带「获取资源」按钮。与 touchgal 不同，它不跳转 —— 所以只配
+    # detail_open_selector、不配 detail_follow_pattern（走「就地展开」分支）。
     search:
       mode: url
       url_template: "https://www.kungal.com/search?keywords={q}"
+      detail_open_selector: "text=本体资源下载"
 
   - id: anime-sharing
     name: Anime-Sharing

@@ -807,16 +807,23 @@ def _follow_detail_gate(
 
     返回抽好的 GameDetail，或 None 表示该站不适用/没找到可跟进的链接。
     只跟进一层：touchgal 的 resource 页就是终点，正文里直接是网盘链。
+
+    特例（kungal 实测）：有些站点了标签页**不跳转**，链接直接在同一页渲染。
+    这种站只配 detail_open_selector、不配 detail_follow_pattern —— 点击后
+    就地重新抽卡，不做导航。
     """
     pattern = site.search.detail_follow_pattern
-    if not pattern:
+    open_sel = site.search.detail_open_selector
+    if not pattern and not open_sel:
         return None
+    # 只有 open_selector 的站 = 「就地展开」，不需要跳转
+    reveal_only = not pattern
 
     opened = None
-    if site.search.detail_open_selector:
+    if open_sel:
         try:
-            el = _first_visible(page, site.search.detail_open_selector)
-            if el is None:
+            el = _first_visible(page, open_sel)
+            if el is None and not reveal_only:
                 el = page.get_by_role("button", name="下载").first
             if el is not None:
                 try:
@@ -826,9 +833,28 @@ def _follow_detail_gate(
                 if not empty:
                     el.click(timeout=8000)
                     page.wait_for_timeout(3000)
-                    opened = site.search.detail_open_selector
+                    opened = open_sel
         except Exception as exc:  # noqa: BLE001
             extra["detail_open_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+
+    if reveal_only:
+        if opened is None:
+            extra.setdefault("detail_reveal_missing", open_sel)
+            return None
+        # 就地重抽：点完标签页后同一页就有网盘链了
+        try:
+            html_now = page.content()
+        except Exception as exc:  # noqa: BLE001
+            extra["detail_reveal_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+            return None
+        extra["detail_revealed"] = True
+        extra["detail_reveal_selector"] = opened
+        extra["detail_reveal_body_len"] = len(html_now)
+        card = extract_card(html_now, detail_url, site.id)
+        card.extra.update(extra)
+        if not card.downloads:
+            card.error = "NO_DOWNLOADS"
+        return card
 
     rx = re.compile(pattern)
     target = None

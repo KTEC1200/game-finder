@@ -256,6 +256,12 @@ def _anchor_title(attrs: str, body_html: str) -> str:
 
 _ANCHOR_TAG_RE = re.compile(r"<a\b|</a\s*>", re.I)
 
+# 单个锚点内部 HTML 的扫描上限。kungal 的搜索结果卡片内层有 3931 字符
+# （封面 + 统计 + 标题 + 社团 + 评分），旧的 4000 上限勉强够、700 窗口远不够：
+# 窗口不够时 `_outer_anchor_inner` 找不到配对的 `</a>`，会退化成「截前 600
+# 字符」，而那 600 字符全是封面 div，游戏名永远取不到。
+_ANCHOR_INNER_LIMIT = 20000
+
 
 def _outer_anchor_inner(body_html: str) -> str:
     """取「外层锚点」的内部 HTML，正确处理嵌套 `<a>`。
@@ -266,7 +272,7 @@ def _outer_anchor_inner(body_html: str) -> str:
     这里按 `<a` / `</a>` 的嵌套深度找到与外层配对的那个结束标签。
     """
     depth = 1
-    limit = min(len(body_html), 4000)
+    limit = min(len(body_html), _ANCHOR_INNER_LIMIT)
     for m in _ANCHOR_TAG_RE.finditer(body_html, 0, limit):
         if m.group(0).lower().startswith("</"):
             depth -= 1
@@ -274,7 +280,32 @@ def _outer_anchor_inner(body_html: str) -> str:
                 return body_html[: m.start()]
         else:
             depth += 1
-    return body_html[: min(len(body_html), 600)]
+    return body_html[: min(len(body_html), _ANCHOR_INNER_LIMIT)]
+
+
+_DATA_URI_RE = re.compile(r"data:[\w/+.\-]+;base64,[A-Za-z0-9+/=\s]{200,}", re.I)
+
+# 「纯讨论串」形状：只有一串数字的帖子路径。压分（不排除），因为有些站的
+# 游戏页本身也走 /topic/…，但一定带 detail 之类的段（jidiyouxi 的
+# `/topic/detail/<id>`），所以这里要求数字紧跟在 topic/post/thread/forum 后。
+THREAD_RE = re.compile(r"/(?:topic|post|thread|forum)/(\d+)/?$", re.I)
+
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+
+
+def _strip_data_uris(html: str) -> str:
+    """把内联 base64 data URI 的载荷压掉（保留前缀，不留正文）。
+
+    kungal 实测（2026-10-18）：搜索结果卡片的封面是内联 base64 PNG，单张卡
+    的 innerHTML 有 8201 字符、其中 8000+ 是图。`parse_result_links` 只把
+    `html[m.end():m.end()+700]` 这段窗口交给 `_anchor_title`，于是窗口里
+    全是 base64，游戏名（在窗口外）永远拿不到，标题退化成
+    `'<div class="kun-image-blur '` 这种碎片。
+
+    在扫描前整体压掉载荷，既保住 DOM 结构（偏移一致），又让 700 字符窗口
+    装得下真正的文本。只压长于 200 字符的载荷，避免误伤小图标。
+    """
+    return _DATA_URI_RE.sub("data:image/x;base64,", html or "")
 
 
 def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
@@ -287,6 +318,7 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
       链接会冒充搜索结果（gamer520 实测就这么选错了游戏）。
     """
     html = strip_chrome(html)
+    html = _strip_data_uris(html)
     titles: dict[str, str] = {}
     scores: dict[str, float] = {}
     order: list[str] = []
@@ -318,7 +350,9 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
         bare = _strip_fragment(url)
         if bare == page_bare:
             continue
-        title = _anchor_title(m.group(0), html[m.end(): m.end() + 700])
+        title = _anchor_title(
+            m.group(0), html[m.end(): m.end() + _ANCHOR_INNER_LIMIT]
+        )
         if bare not in titles:
             order.append(bare)
             titles[bare] = title
@@ -337,7 +371,25 @@ def parse_result_links(html: str, page_url: str, site: Site) -> list[SearchHit]:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"[\s\-_·・:：,，.。()（）\[\]【】]+", "", (s or "").lower())
+    """归一化：小写 + 去掉分隔符与装饰性符号。
+
+    装饰符号这一项是 kungal 实测加的：站点官方名是「千恋＊万花」（全角星号
+    U+FF0A 插在中间），用户输入「千恋万花」时子串匹配直接失败。这类星号/
+    波浪号在标题里只是排版装饰，不该参与匹配。
+    """
+    return re.sub(
+        r"[\s\-_·・:：,，.。()（）\[\]【】＊﹡∗★☆〜~～/／|｜]+", "", (s or "").lower()
+    )
+
+
+def _norm_spaced(s: str) -> str:
+    """只去掉装饰性符号、**保留空白**的归一化。
+
+    `_norm` 会连空格一起去掉，用于「逐字命中率」；但查询词的正则对拉丁词要求
+    词边界（`(?<![a-z0-9])`），把空格也去掉后 `Ender Lilies` 会粘成
+    `enderlilies`，边界断言就对不上了。这个版本只清装饰符号。
+    """
+    return re.sub(r"[＊﹡∗★☆〜~～/／|｜·・]+", " ", (s or "").lower())
 
 
 def _query_pattern(q_raw: str) -> str | None:
@@ -370,6 +422,13 @@ def pick_best(hits: list[SearchHit], query: str, min_score: float = 1.0) -> Sear
       +1   命中的位置越靠标题开头越好
       +命中率 逐字命中率，缓解标题里混了别的东西
       +0.1 详情形状链接（DETAILISH_RE）的小幅加权
+      -6   纯讨论串形状（THREAD_RE）—— 见下
+
+    讨论串压分（2026-10-18 kungal 实测）：搜索结果是混合的，游戏条目
+    `/galgame/15`（有「本体资源下载」标签页）与论坛帖 `/topic/3887`（纯讨论）
+    同时命中。帖子标题以查询词开头，位置分拿满，条目页标题前面有统计数字
+    （`266576 93 3 天前 千恋＊万花 …`）位置分略低 —— 于是选了**讨论帖**，
+    用户拿不到下载链接。压分而不是排除：只有帖子命中时仍要能返回。
     """
     if not hits:
         return None
@@ -383,18 +442,36 @@ def pick_best(hits: list[SearchHit], query: str, min_score: float = 1.0) -> Sear
     best_score = -1.0
     for h in pool:
         raw_title = h.title or ""
-        low = raw_title.lower()
         score = 0.0
+        pos = None
         if rx is not None:
             m = rx.search(raw_title)
-            if m:
-                score += 12.0
-                # 命中越靠前越好（标题开头就是游戏名）
-                score += 1.0 * (1.0 - min(m.start(), 60) / 60.0)
+            if m is not None:
+                pos = m.start()
+            else:
+                # 站点官方名常带排版装饰（kungal 是「千恋＊万花」全角星号），
+                # 原始标题上匹配不到。退到「只去装饰、保留空格」的形态再试一次，
+                # 这样拉丁词边界 `(?<![a-z0-9])` 依然有效。
+                m = rx.search(_norm_spaced(raw_title))
+                if m is not None:
+                    pos = m.start()
+                elif _CJK_RE.search(query or ""):
+                    # CJK 标题里装饰符可能插在词中间（千恋＊万花），去空格后
+                    # 才能命中。只对 CJK 查询启用：拉丁短查询（"AI"）去空格
+                    # 会命中 "Chained"，那正是 Task 7 修掉的缺陷。
+                    i = _norm(raw_title).find(_norm(query))
+                    if i >= 0:
+                        pos = i
+        if pos is not None:
+            score += 12.0
+            # 命中越靠前越好（标题开头就是游戏名）
+            score += 1.0 * (1.0 - min(pos, 60) / 60.0)
         t = _norm(raw_title)
         if qn:
             score += sum(1 for ch in qn if ch in t) / len(qn)
         score += h.score * 0.1
+        if THREAD_RE.search(urlparse(h.url).path or ""):
+            score -= 6.0
         if score > best_score:
             best_score = score
             best = h

@@ -193,10 +193,32 @@ def decode_qr_pan_links(html: str) -> list[str]:
     return out
 
 
+_JSON_SLASH_RE = re.compile(r"\\u002[fF]")
+
+
+def _decode_embedded_json(html: str) -> str:
+    """还原内嵌 JSON 里的 `\\u002F` 转义斜杠。
+
+    kungal 实测（2026-10-18）：资源页正文存在 Nuxt payload（一个巨大内联
+    JSON 数组）里，链接写作
+
+        "https:\\u002F\\u002Fpan.baidu.com\\u002Fs\\u002F1Dau8...?pwd=t7cp"
+
+    `URL_RE = r"https?://[^\\s\\"'<>\\\\]+"` 排除反斜杠，于是整页 685 处
+    `\\u002F` 一条都抽不出来。`html_mod.unescape` 只处理 `&amp;` 这类 HTML
+    实体，不动 JSON 转义，所以必须单独还原。
+
+    只替换这两个斜杠形态，不做整体 json.loads —— payload 里混着非 JSON 片段
+    （函数调用、裸变量名），整体解析会失败。其他 `\\uXXXX`（如中文）保持原样：
+    它们不影响 URL 识别，替换成真字符反而可能让正则窗口变复杂。
+    """
+    return _JSON_SLASH_RE.sub("/", html or "")
+
+
 def extract_downloads(html: str, page_url: str) -> list[Download]:
     """从整页 HTML 抽下载链接。不依赖 <a> 标签 —— 这是 jidiyouxi 的关键。"""
     seen: dict[str, Download] = {}
-    decoded = html_mod.unescape(html)
+    decoded = _decode_embedded_json(html_mod.unescape(html))
 
     for m in URL_RE.finditer(decoded):
         url = _trim_url(m.group(0))
