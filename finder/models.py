@@ -32,6 +32,14 @@ class SearchSpec:
     # 详情页里指向 `.torrent` 种子的链接选择器（byrutgame 实测）：
     # 点它返回 application/x-bittorrent，磁力链由种子的 info hash 本地算出。
     torrent_selector: str | None = None
+    # 详情页下载要走「点击 → 中间页 → 换真实链接」的站，用命名流程：
+    #   "ggbases"    → magnet.so?id=N 页 POST 取 hash
+    #   "ankergames" → 点 Download 开模态 → /download/<payload> → Turnstile
+    #                  token → /link?cf-turnstile-response= -> {"link": "..."}
+    download_flow: str | None = None
+    # download_flow 需要的「开下载入口」选择器（ankergames 实测：
+    # 详情页 Download 按钮是 Alpine @click="$dispatch('open-download-modal')"）
+    download_open_selector: str | None = None
 
 
 @dataclass

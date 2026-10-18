@@ -715,9 +715,13 @@ def _extract_detail(
         # 磁力在独立的 magnet.so?id=N 页，hash 由页面 JS POST 拿。
         # 必须在**页面内 fetch**（复用浏览器网络栈与 cookie）：page.request
         # 走独立 TLS 连接，实测 ECONNRESET / 30s 超时。
-        if site.id == "ggbases":
+        if site.search.download_flow == "ggbases":
             card.downloads = _fetch_ggbases_magnets(
                 page, detail_html, detail_url, timeout_ms, extra
+            )
+        elif site.search.download_flow == "ankergames":
+            card.downloads = _fetch_ankergames_link(
+                page, site, timeout_ms, extra
             )
         if site.search.torrent_selector:
             card.downloads = card.downloads + _fetch_torrent_magnets(
@@ -874,6 +878,121 @@ def _fetch_torrent_magnets(
         extra.setdefault("torrent_errors", []).append("parse: no-info-hash")
         return []
     return [Download(kind="magnet", url=magnet, label="种子")]
+
+
+def _fetch_ankergames_link(
+    page, site: Site, timeout_ms: int, extra: dict[str, Any]
+) -> list[Download]:
+    """ankergames：下载要过「生成下载页 → Cloudflare Turnstile → /link」。
+
+    实测流程 2026-10-18（无登录、无需人工过盾）：
+      1. 详情页 HTML 里有 `generateDownloadUrl(<download_id>)`（实测 id=1524）。
+         它只是 POST `/generate-download-url/<id>`（带 csrf-token），返回
+         `{"success":true,"download_url":".../download/<payload>/<hash>"}`。
+         **直接调这个接口比点按钮稳**：点按钮要靠 Alpine 模态 + 标签跳转，
+         实测同一次会话里时成时不成（广告脚本/Turnstile 会抢时序）。
+      2. 打开那个 `download_url`（中间页），页内 `window.agTurnstile.tokenAsync()`
+         静默出 token。
+      3. 页面内 fetch `<base>/link?cf-turnstile-response=<token>` 回
+         `{"success":true,"link":"https://tunnel5.dlproxy.uk/download/...?sig=..."}`。
+
+    全程在页面内（fetch 复用浏览器网络栈与 cookie）；`page.request` 走独立
+    TLS 连接，与 ggbases 同因会被拒。取不到返回空并写 extra 错误，不猜链接。
+    """
+    errs: list[str] = []
+
+    def _fail(msg: str) -> list[Download]:
+        extra["ank_errors"] = errs + [msg]
+        return []
+
+    # 1. 取 download_id → 生成中间页 URL
+    try:
+        dl_id = page.evaluate(
+            """() => {
+                const html = document.documentElement.outerHTML;
+                const m = html.match(/generateDownloadUrl\\((\\d+)\\)/);
+                return m ? m[1] : '';
+            }"""
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"id: {type(exc).__name__}")
+    if not dl_id:
+        return _fail("id: not-found")
+    extra["ank_download_id"] = dl_id
+    try:
+        gen = page.evaluate(
+            """async (id) => {
+                const meta = document.querySelector('meta[name=csrf-token]');
+                const r = await fetch('/generate-download-url/' + id, {
+                    method: 'POST', credentials: 'include',
+                    headers: {'X-CSRF-TOKEN': meta ? meta.content : '',
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Content-Type': 'application/json',
+                              'Accept': 'application/json'},
+                    body: '{}'
+                });
+                return await r.text();
+            }""",
+            dl_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"generate: {type(exc).__name__}")
+    try:
+        mid_url = (json.loads(gen or "{}") or {}).get("download_url") or ""
+    except Exception:  # noqa: BLE001
+        return _fail("generate: bad-json")
+    if not mid_url.startswith("http"):
+        return _fail("generate: no-download-url")
+    extra["ank_mid_url"] = mid_url[:120]
+
+    # 2. 打开中间页（换到它自己的对象上取 token）
+    try:
+        status, nav_err = _goto(page, mid_url, timeout_ms)
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"mid: {type(exc).__name__}")
+    if nav_err:
+        return _fail(f"mid: {nav_err}")
+    _settle(page, 3000)                        # 等 Turnstile 脚本就绪
+
+    # 3. 页内取 token → /link
+    try:
+        body = page.evaluate(
+            """async () => {
+                const el = document.querySelector('[x-data*=downloadPage]');
+                const raw = el ? (el.getAttribute('x-data') || '') : '';
+                const m = raw.match(/downloadPage\\('([^']+)'/);
+                if (!m) return JSON.stringify({error: 'no-base-url'});
+                const base = m[1].replace(/\\\\/g, '');
+                if (!window.agTurnstile || !window.agTurnstile.tokenAsync) {
+                    return JSON.stringify({error: 'no-turnstile'});
+                }
+                let tok = '';
+                // tokenAsync 在脚本还没就绪时会抛，轮询几次再放弃
+                for (let i = 0; i < 20; i++) {
+                    try { tok = await window.agTurnstile.tokenAsync(); }
+                    catch (e) { tok = ''; }
+                    if (tok) break;
+                    await new Promise(r => setTimeout(r, 500));
+                }
+                if (!tok) return JSON.stringify({error: 'empty-token'});
+                const r = await fetch(base + '/link?cf-turnstile-response=' +
+                                      encodeURIComponent(tok), {credentials: 'include'});
+                return await r.text();
+            }"""
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"link: {type(exc).__name__}")
+    try:
+        payload = json.loads(body or "{}")
+    except Exception:  # noqa: BLE001
+        return _fail("link: bad-json")
+    if payload.get("error"):
+        return _fail(f"link: {payload['error']}")
+    link = (payload.get("link") or "").strip()
+    if not link.startswith("http"):
+        return _fail("link: missing")
+    extra["ank_link_len"] = len(link)
+    return [Download(kind="direct", url=link, label="直链")]
 
 
 def _follow_detail_gate(

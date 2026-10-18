@@ -52,6 +52,9 @@ sites:
     search:
       mode: url
       url_template: "https://ankergames.net/search/{q}"
+      # 无需登录：POST /generate-download-url/<id> 拿中间页 → 页内
+      # Cloudflare Turnstile 静默出 token → /link 返真实直链
+      download_flow: ankergames
 
   - id: gamebounty
     name: GAMEBOUNTY
@@ -164,6 +167,9 @@ sites:
     search:
       mode: url
       url_template: "https://ggbases.dlgal.com/search.so?p=0&title={q}"
+      # 详情页没有任何 magnet: 文本；磁力在 magnet.so?id=N 页，
+      # hash 由那页 JS POST 拿（见 finder/pipeline.py: _fetch_ggbases_magnets）
+      download_flow: ggbases
 
   - id: touchgal
     name: TouchGal
