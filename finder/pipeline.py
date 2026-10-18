@@ -59,6 +59,9 @@ SETTLE_MS = 2500
 # 排版空白（不间断空格 U+00A0 / 全角空格 U+3000 等）归一成普通空格。
 # ggbases 空结果页输出 `0\xa0個資源`，不做归一化标记永远匹配不上。
 _SPACEY_RE = re.compile(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000\t\r\n]+")
+# 路径里的「搜索段」——用来把站内搜索 URL 从「详情页形状」里排掉。
+# 刻意只收 search/find/query：`s`、`so` 这类太短的词会把正常路径误伤。
+SEARCH_PATH_RE = re.compile(r"(?:^|/)(?:search|find|query)(?:/|$)", re.I)
 
 # 被 Cloudflare / 防火墙挡下来的页面特征（小写匹配）
 BLOCK_MARKERS = (
@@ -398,12 +401,40 @@ RETRYABLE_NAV = (
 )
 
 
+def _is_site_search_url(site: Site, url: str) -> bool:
+    """url 是不是这个站的**站内搜索 URL 本身**。
+
+    jidiyouxi 的搜索模板是 `https://www.jidiyouxi.com/search/detail/{q}` ——
+    路径形状跟详情页一模一样，只看 `DETAILISH_RE` 会把它当成「搜索即跳详情」，
+    于是搜索页渲染成空壳（站点抖动）时被当成详情页去抽卡，用户拿到的是
+    误导性的 `WRONG_GAME`（2026-10-18 实测 3 次里出现 1 次）。
+
+    先按**站点自己的模板前缀**认（精确），再退回通用的 `/search` 路径段。
+    """
+    if not url:
+        return False
+    tpl = getattr(site.search, "url_template", None) or ""
+    if "{q}" in tpl:
+        prefix = tpl.split("{q}", 1)[0]
+        if prefix and url.startswith(prefix):
+            return True
+    try:
+        path = urlparse(url).path or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(SEARCH_PATH_RE.search(path))
+
+
 def _looks_detail_page(site: Site, url: str) -> bool:
     """当前 URL 是不是「详情页形状」——用于识别「搜索即跳详情」的站点。
 
     只判路径形状，不看正文：正文判断在 _extract_detail 里已有内容证据闸门，
     这里的作用只是决定「不要因为没解析出列表就放弃」。
     """
+    if _is_site_search_url(site, url):
+        # 搜索页长得像详情页（jidiyouxi）时，宁可报「没有结果」也不要
+        # 假装站在详情页上 —— 后者会把站点抖动说成「页面内容对不上查询」。
+        return False
     try:
         parsed = urlparse(url or "")
     except Exception:  # noqa: BLE001
@@ -654,7 +685,16 @@ def search_one(
         # 再来同样的请求就正常渲染出结果。**这类暂态必须先重试**，否则会把
         # 「站点抖了一下」永久记成 NO_RESULTS（还会进失败缓存）。
         for _retry in range(2):
-            if not _looks_transient(page.content()):
+            html_now = page.content()
+            # **已经有候选就不许重载**。`_TRANSIENT_TEXT_MIN` 是按「正文至少
+            # 300 字」猜的，而 jidiyouxi 是 JS 渲染页：出结果时 `_visible_text`
+            # 也只有 250 字 → 被误判成暂态 → 把**已经拿到的结果重载冲掉**，
+            # 重载又要重新碰站点的随机空响应。实测（2026-10-18）这条路让同一个
+            # 查询 3 次里只成功 1 次；而单纯轮询页面时 4 秒就有 hits=1。
+            # 「解析出候选」是硬证据 —— 跟「候选覆盖无结果标记」同一条原则。
+            if parse_result_links(html_now, page.url, site):
+                break
+            if not _looks_transient(html_now):
                 break
             extra.setdefault("search_transient_retries", 0)
             extra["search_transient_retries"] += 1
