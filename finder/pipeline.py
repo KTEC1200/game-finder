@@ -312,6 +312,26 @@ TRANSIENT_MARKERS = ("network error",)
 # 只用标记命中判断即可；这个阈值用于「标记没命中但正文短得可疑」时补一次重试。
 _TRANSIENT_TEXT_MIN = 300
 
+# 搜索页被站点重定向到登录页。galgame.dev 实测：搜索 URL 直接 302 到 /login，
+# 页面上只剩导航链接，被解析成 6 条 0.5 分候选 → pick_best 返回 None →
+# 报成 NO_RESULTS，用户会以为站上没有这款游戏（sites.yaml 里它本来就标了
+# needs_login: true）。
+#
+# 只认**落地 URL 的路径**，不扫正文：导航里到处都有「登录」「登录后可见」
+# 这类词，扫 HTML 会把每个带登录入口的搜索页都误判成墙。
+_LOGIN_PATH_RE = re.compile(
+    r"/(?:login|log-in|signin|sign-in|sign_in|auth|account/login)(?:[/?#]|$)",
+    re.I,
+)
+
+
+def looks_login_wall(url: str, html: str = "") -> str | None:
+    """搜索落地在某站的登录页 → 报 NEEDS_LOGIN，而不是假装「没有结果」。"""
+    path = urlparse(url or "").path or ""
+    if _LOGIN_PATH_RE.search(path):
+        return "NEEDS_LOGIN: 该站搜索需要先登录（搜索页被重定向到登录页）"
+    return None
+
 
 def _looks_transient(html: str) -> bool:
     text = _SPACEY_RE.sub(" ", _visible_text(html))
@@ -725,7 +745,7 @@ def search_one(
             }
         )
 
-    # 搜索层失败：拦截 > 明确无结果 > 导航失败 > HTTP 错 > 没有候选
+    # 搜索层失败：拦截 > 登录墙 > 明确无结果 > 导航失败 > HTTP 错 > 没有候选
     if search_block:
         return GameDetail(
             site_id=site.id,
@@ -734,6 +754,20 @@ def search_one(
             error=f"BLOCKED_SEARCH: {search_block}",
             extra=extra,
         )
+    # 登录墙优先于「没有结果」：重定向到 /login 的页面上必然解析不出候选，
+    # 但原因不是「站上没有这款游戏」，而是「这个站不让未登录的人搜」。
+    # 只有真解析不出候选时才算墙 —— 有候选就说明搜索确实执行了。
+    if best is None and not direct_detail:
+        login_wall = looks_login_wall(search_url, search_html)
+        if login_wall:
+            extra["search_login_wall"] = search_url
+            return GameDetail(
+                site_id=site.id,
+                url=search_url,
+                title="",
+                error=login_wall,
+                extra=extra,
+            )
     if no_results:
         return GameDetail(
             site_id=site.id,
