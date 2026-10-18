@@ -19,4 +19,4 @@ HTML = f"<div>{BODY}</div>"
 
 
 def test_ankergames_empty_catalogue_is_recognised():
-    assert looks_no_results(HTML)
+    assert looks_no_results("", HTML)
