@@ -24,6 +24,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlparse
 
+from .lang import CJK_RE, KANA_RE
 from .models import SearchHit, Site
 
 NAV_RE = re.compile(
@@ -227,6 +228,41 @@ def clamp_query(site: Site, query: str) -> tuple[str, bool]:
     if limit and len(query) > limit:
         return query[:limit], True
     return query, False
+
+
+def clamp_query_detail(site: Site, query: str) -> tuple[str, bool, bool]:
+    """按站点词长上限截断，并额外判断「是否把拉丁词拦腰切断」。
+
+    返回 `(实际查询词, 是否截断, 是否切在词中间)`。`clamp_query` 保持旧的两值
+    契约不变（缓存键等旧调用方依赖它），本函数只给 `search_one` 用。
+
+    为什么要判「切在词中间」（真站实测 2026-10-18，acggw `max_query_len: 10`）：
+    用户查 `summer clover`（13 字）被截成 `summer clo`。acggw 的详情页命中
+    `summer` 但不命中 `clo`；然而整句 `summer clo` 又是 `Summer Clover` 的
+    **子串**，「整句匹配」这一层挡不住 → 用户看到的是**别的游戏**。
+    所以这类截断必须在发请求之前就放弃该站（报 `QUERY_TOO_LONG`），
+    不能拿半截词去搜。
+
+    规则（由 tests/test_mid_word_cut.py 锁定）：
+      - 拉丁词：截断点两侧都是字母/数字才算半词（`summer cl|over`）。
+      - 切在空格上（`summer |clover`）或切在完整 token 之后（`summer clo| ver`）
+        都算**干净**截断 —— 截下来的整词仍能代表查询意图，照旧去搜。
+      - CJK / 假名没有词边界（而且 `'莉'.isalnum()` 为真），硬截断永远放行；
+        混合查询只要含 CJK/假名就跟随 CJK 规则。
+      - 没有站点上限 / 未发生截断时永远是 False。
+    """
+    q, truncated = clamp_query(site, query)
+    if not truncated:
+        return q, False, False
+    raw = query or ""
+    if CJK_RE.search(raw) or KANA_RE.search(raw):
+        return q, True, False
+    limit = len(q)
+    if limit <= 0 or limit >= len(raw):
+        return q, True, False
+    if raw[limit - 1].isalnum() and raw[limit].isalnum():
+        return q, True, True
+    return q, True, False
 
 
 def _same_origin(url: str, page_url: str) -> bool:

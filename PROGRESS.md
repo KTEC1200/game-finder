@@ -24,7 +24,7 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **357 个离线测试全绿** |
+| 代码 / 测试 | ✅ **435 个离线测试全绿**（2026-10-20 复跑；新增 47 例锁定 W4 五项修复 + 8 例分卷/配置锁定） |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 + 换名提示 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
@@ -290,10 +290,97 @@ python app.py
     `_looks_detail_page` 命中即返回 False。
     回归保护：inarigal 的「搜索 302 到 `/detail/64`」必须仍然认成详情页。
 
+### 2026-10-20 第二轮（W4 五项，全部有测试锁定）
+
+26. **半截词拿去搜 → 搜出别的游戏**（acggw，`max_query_len: 10`）
+    用户查 `summer clover`（13 字）被截成 `summer clo`。acggw 的详情页命中
+    `summer` 但不命中 `clo`，而整句 `summer clo` 又是 `Summer Clover` 的**子串**
+    —— 连「整句匹配」都挡不住。修法：新增 `clamp_query_detail()` 返回
+    `(词, 是否截断, 是否切在词中间)`，切在词中间时**在发任何请求之前**就放弃该站，
+    报 `QUERY_TOO_LONG`（`extra["query_truncation"]="mid_word"`）。
+    `clamp_query()` 保持旧两值契约（缓存键等旧调用方依赖）。
+    切在空格上或完整 token 之后算干净截断，照旧去搜；CJK/假名没有词边界，
+    硬截断永远放行（混合查询只要含 CJK 就跟随 CJK 规则）。
+27. **证据闸门写成 `>0` → 只命中一半也放行**（galgamex/acggw）
+    旧闸门只要命中**任一**词就通过。改为 `_query_evidence_ok()`：
+    拉丁查询要求 >=3 字的 token **全部**命中（`_evidence_counts` 同时算出
+    命中数与所需数，两者永远用同一套计法）。`_query_evidence()` 保留旧语义
+    供诊断与既有测试用。3–4 字词不做「去分隔符紧致匹配」（`clo` 不能命中
+    `clover`），>=5 字才允许（`enderlilies` 要能对上 `Ender Lilies`）。
+28. **form 模式把「站点说没有」报成「表单没生效」**（touchgal）
+    查 `夏色四叶草` 时页面逐字显示 `未找到相關內容`，但 URL 不变、也不新增锚点，
+    于是 `FormOutcome.effective == False` → 报误导性的 `FORM_FAILED`。
+    修法：在判失败之前先复查站点自己的空结果文案，命中则报 `NO_RESULTS: <原文>`。
+    守卫：**没有空结果文案时绝不能因为页面有链接就报成功**（首页残留链接
+    不是结果）；空文案命中时也仍然只能报 `NO_RESULTS`。
+    两条长标记必须排在笼统的「未找到相关」**之前**（标记表按顺序取首个命中，
+    否则报错里只剩短标记，丢掉站方原文）。
+29. **WRONG_GAME 卡片仍挂着错游戏的标题**（ankergames）
+    查 `summer clover` 时 `pick_best` 选中 Castlevania（28 条候选里评分最高），
+    证据 0 → 报 `WRONG_GAME`，但卡片标题还是 `Castlevania: Symphony of the Night`，
+    配着 `match=strong` 看起来像「找到了」。修法：产生 WRONG_GAME 时清空
+    `card.title`，原值留进 `extra["wrong_game_title"]` / `extra["wrong_game_url"]`
+    （**即使原标题是空串也要留键**，方便区分「抽不到标题」与「抽到别的标题」）。
+    `pick_best` 选择逻辑一个字都没动。
+30. **下载链由 JS 现场生成，抽 HTML 永远抽不到**（galgamex）
+    详情页 48 个锚点里没有一条是下载链。真链要「点资源下载标签页 → 点供应商按钮」
+    才出现，开新窗口 `https://www.galgamex.net/redirect?url=<真链>`。
+    新增 `download_flow: popup_redirect` + `_fetch_popup_redirect_links()`：
+    `context.route("**/redirect*")` 读 URL 后 `route.abort()`（不加载网盘页，
+    省流量且不触发风控），`context.on("page")` 兜 `window.open` 直接开新页的情形
+    并立刻 close，收尾必须 `context.unroute`。
+    纪律：单按钮坏掉只记 `extra["galgamex_errors"]` 不拖死其它按钮；同一 URL 去重；
+    无 selector 时返回空且不抛；点击上限 `MAX_PROVIDER_CLICKS = 12`。
+    过滤 `javascript:void(0)` 与站点图标（复用 `ASSET_URL_RE`）。
+    配套修：`_follow_detail_gate` 只在**还没拿到链接**时兜底 —— 它原本无条件调用，
+    reveal_only 分支会把 popup 流程刚点出来的链接整体丢掉。
+
+32. **选择器不能靠猜：`a.download-provider` 在真站根本不存在**（galgamex，真机复测）
+    写测试时用的 `a.download-provider` 是**凭空想的**：真站静态 HTML 里
+    `download-provider` 出现 **0 次**，供应商控件全是 `<button>`，纯客户端渲染。
+    真机 Playwright 逐元素量出来：资源卡片里「分卷 1 / 分卷 2 / 百度网盘」三个按钮
+    的 class **完全相同**（shadcn 的一长串工具类），只有 `data-variant` / `data-size`
+    能把它们和「复制」（`data-variant="ghost"`）、顶部「登录」（`data-size="default"`）
+    分开。最终选择器：
+    `button[data-slot='button'][data-variant='default'][data-size='sm']`（实测恰好 3 个）。
+    **教训：离线测试全绿 ≠ 真站能用；选择器必须在真机上量，量不到就得改测试。**
+
+33. **点完供应商按钮只等固定 400ms → 漏掉最后一个供应商**（galgamex，真机复现）
+    真机跑 `_fetch_popup_redirect_links` 时，3 个按钮都点到了、`galgamex_errors` 为空，
+    但**只回 2 条链**（两个分卷直链），`pan.baidu.com` 那条丢了。
+    逐按钮加日志才发现：「分卷」是直接跳转（几十毫秒命中 route），
+    「百度网盘」要先开弹窗再跳，**400ms 内 route 还没触发**。
+    修法：固定 sleep 改成**轮询**（`_PROVIDER_POLL_MS = 200`，
+    上限 `_PROVIDER_WAIT_MS = 4000`），拿到候选立刻收工，命中后再给一个 poll 余量
+    让重复跳转落齐。修后真机 3/3 全取到（含 `https://pan.baidu.com/s/1aCmoplMimsXAb16i9tfP_A?pwd=us6i`）。
+    **教训：「点了但没链」不等于「按钮没链」，先怀疑等待时机。**
+
+34. **分卷包 `.z01` 被判成 `unknown`**
+    galgamex 直链形如 `Gamex-005103/%23A8824.z01`（7z 分卷）与 `%23A8824.zip` 成对出现。
+    `_classify` 的扩展名白名单只认 `.zip`，第一卷落进 `unknown`，卡片上看起来像「没认出来」。
+    修法：白名单补 `z\d{2,3}` / `r\d{2,3}` / `part\d+`（7z、rar 分卷、partN 通用形状）。
+
+31. **`page.content()` 读失败被当成「空结果页」**
+    `_NoNavPage` 这类不含 `content()` 的页面直接 AttributeError 崩溃；真站上页面
+    被关掉/导航中抛异常时，一次读失败会被下游「暂态」判定接手，最后谎报成
+    `NO_RESULTS` 并进失败缓存 30 分钟。修法：`search_one` / `_extract_detail`
+    一律走已有的 `_page_content()` 助手（读不出返回 None），None 时报
+    `PAGE_READ_FAILED`，**绝不**当空结果。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
 
+- **galgamex**：`search?q={q}`。详情页 `/game/{id}` 原始 HTML **一条下载链都没有**
+  （48 个锚点全是导航/封面）。真链是 JS 现场生成的：点「资源下载」标签页
+  （`detail_open_selector: button:has-text('资源下载')`）→ 渲染出资源卡片按钮
+  （分卷 N / 百度网盘 / 夸克…）→ 点按钮开新窗口
+  `https://www.galgamex.net/redirect?url=<quote(真链)>`，`unquote(url 参数)` 才是真链，
+  同时打 `POST /api/game/resource/<id>/download`。走 `download_flow: popup_redirect`
+  （路由拦截 + popup 兜底）。**不要指望抽 HTML**。
+  ⚠️ 供应商按钮的 class 与「分卷」按钮**完全一样**，只能靠
+  `button[data-slot='button'][data-variant='default'][data-size='sm']` 定位
+  （见缺陷 32）；点完要**轮询**等跳转，固定 sleep 会漏（缺陷 33）。
 - **jidiyouxi**：URL 模板 `search/detail/{q}`；详情页网盘链在整页 HTML 的 `#appState`
   SSR 数据里，`<a>` 标签 0 条外链；`og:image` 是坏字符串 `"[object Object]"`（站点自己的 bug）；
   不同游戏默认 tab 不同（本体/修改器/讨论求助）。
@@ -369,14 +456,16 @@ finder/models.py            Site / SearchSpec / SearchHit / Download / GameDetai
 finder/sites.py             load_sites / filter_sites_by_lang
 finder/browser.py           BrowserSession（专用 profile + 真 UA + 显式代理）
 finder/search.py            build_search_url / parse_result_links / pick_best / strip_chrome
+                            clamp_query_detail（半截词判定）
 finder/detail.py            extract_card / extract_downloads / decode_gb_dl_links
 finder/pipeline.py          search_one（url/form/index 三模式）/ _follow_detail_gate
+                            _query_evidence_ok（全 token 证据闸）/ _fetch_popup_redirect_links
                             run（缓存 + 并发）/ normalize_query / resolve_worker_primary
 finder/health.py            classify / check_site（状态机就绪，无定时器）
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
 finder/web/static/index.html  单页 UI
-tests/                      357 个离线测试 + fixtures
+tests/                      435 个离线测试 + fixtures
 ```
 
 ---
@@ -388,6 +477,12 @@ tests/                      357 个离线测试 + fixtures
 - **ggbases** ✅ 三语 WRONG_GAME → 日文 dl=7、中文/英文 `NO_RESULTS: 0 個資源`（站点真 0 条）
 - **kungal** ✅ SPA 标签页 + `\u002F` 转义 + base64 封面 + 讨论帖压分，`千恋万花` → dl=23
 - **anime-sharing** ✅ 论坛帖 slug + 求资源帖压分 + 页面装饰过滤，`制服カノジョ` → dl=3
+- **galgamex** ✅（2026-10-20）`popup_redirect` 流程接入，详见缺陷 30。
+  **真站已复测**（2026-10-20，Playwright 直连 + 真实 UA）：
+  `/game/cbe7d89e` 上 `_fetch_popup_redirect_links` 点 3 个资源按钮 → 取回 **3/3** 条链
+  （2 个分卷直链 + `https://pan.baidu.com/s/1aCmoplMimsXAb16i9tfP_A?pwd=us6i`），
+  `galgamex_errors` 为空。期间发现并修掉三个真机才暴露的问题：
+  选择器是猜的（缺陷 32）、固定 sleep 漏最后一条（缺陷 33）、`.z01` 分卷判 unknown（缺陷 34）。
 
 ### 仍待处理
 
@@ -418,6 +513,18 @@ tests/                      357 个离线测试 + fixtures
 - **子进程崩溃不许记成 TIMEOUT**：`sweep_par.py` 现在区分「卡住被杀」（`TIMEOUT_<n>s`）
   与「自己崩了」（`CRASH_rc<N>: <stderr 末行>`）—— 曾把 `ImportError` 藏成 21 个
   TIMEOUT，白查一轮。
+- **测试脚手架也会说谎**（2026-10-20 一次踩两处）：`_FakeDetailPage` 的 `content()`
+  读 `self._search_html`，而 `__init__` 从没设过这个属性 → 一运行就 AttributeError，
+  看起来像实现有 bug；`test_mid_word_cut` 把 `enderlilies[:10]` 的期望值写成
+  9 字符的 `enderlili`（正确是 `enderlilie`），与同文件锁定的 `clamp_query` 契约
+  自相矛盾。**先核对测试自身的期望值能不能由规则推出来，再怀疑实现。**
+- **离线全绿 ≠ 真站能用**（2026-10-20，galgamex 连踩三次）：测试里写死的选择器
+  `a.download-provider` 在真站**根本不存在**（纯 `<button>`，静态 HTML 里该串出现 0 次）；
+  固定 400ms 等待在真机上漏掉最后一个供应商按钮；`.z01` 分卷被判 unknown。
+  三个问题**没有一个能被离线测试发现**，全靠 Playwright 直连真站逐元素量出来。
+  → 凡是涉及第三方站点 DOM/时序的改动，**必须有一次真机验证**才能标 ✅；
+  且真机脚本要**写 JSON/TXT 再用 read 看**（GBK 控制台会把 CJK 打成乱码，
+  直接看 stdout 会误判按钮文字）。
 
 ### 已完成的基础设施
 

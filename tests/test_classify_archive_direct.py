@@ -50,3 +50,26 @@ def test_pan_and_filehost_are_unaffected():
     assert _classify("https://pan.baidu.com/s/1abc?pwd=x") == "pan"
     assert _classify("magnet:?xt=urn:btih:" + "a" * 40) == "magnet"
     assert _classify("https://rapidgator.net/file/abc/x.rar.html") == "filehost"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # galgamex 真机实测（2026-10-20，`/game/cbe7d89e`）：直链成对出现，
+        # 第一卷是 `.z01`（7z 分卷），原白名单只认 `.zip`，它被判成 unknown。
+        "https://game.galgamex.com/5001-5500/Gamex-005103/%23A8824.z01",
+        "https://cdn.example.com/game.7z.001",
+        "https://cdn.example.com/game.r00",
+        "https://cdn.example.com/game.part3.rar",
+        "https://cdn.example.com/game.zip?X-Amz-Signature=abc",
+    ],
+)
+def test_multi_volume_archives_are_direct(url):
+    """分卷包（.z01/.r00/.partN）也是下载物，不能落进 unknown。"""
+    assert _classify(url) == "direct"
+
+
+def test_z_prefix_without_digits_is_not_direct():
+    """别把 `z` 开头的普通路径误伤成下载（白名单要求 2-3 位数字）。"""
+    assert _classify("https://example.com/zeta") != "direct"
+    assert _classify("https://example.com/game.z") != "direct"

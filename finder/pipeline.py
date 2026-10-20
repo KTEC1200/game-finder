@@ -30,9 +30,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from .detail import (
+    ASSET_URL_RE,
     _classify,
     build_magnet_from_torrent,
     build_magnet_url,
@@ -47,6 +48,7 @@ from .search import (
     _norm,
     build_search_url,
     clamp_query,
+    clamp_query_detail,
     parse_result_links,
     pick_best,
 )
@@ -79,6 +81,14 @@ NO_RESULTS_MARKERS = (
     "nothing found",
     "nothing matched your search",
     "no results",
+    #   touchgal → "未找到相關內容"（2026-10-18 实测，form 模式查「夏色四叶草」）。
+    #   该站的搜索**确实执行了**，但页面不跳转、也不新增锚点 —— 只有这句文案
+    #   是站方给出的「没有」结论。少了它，`FormOutcome.effective` 会判成
+    #   「表单没生效」，用户拿到误导性的 FORM_FAILED。
+    #   **必须排在笼统的「未找到相关」之前**：标记表是按顺序取首个命中，
+    #   先命中短标记的话，报错里就只剩「未找到相关」，丢掉站方原文。
+    "未找到相關內容",
+    "未找到相关内容",
     "抱歉，没有找到",
     "没有找到相关",
     "未找到相关",
@@ -587,6 +597,59 @@ def _detail_body_text(page, html: str) -> str:
     return _visible_text(html)
 
 
+def _evidence_counts(query: str, title: str, body_text: str) -> tuple[int, int]:
+    """返回 `(命中项数, 通过所需的命中项数)`。计法与 `_query_evidence` 完全一致。
+
+    抽出来是为了让「命中多少」和「够不够」两个判断永远用同一套计法 ——
+    旧代码只有命中数，闸门写成 `> 0`，于是 acggw 的 `summer clo`
+    （summer 中、clo 不中）照样放行，用户看到别的游戏。
+    """
+    hay = f"{title or ''} {body_text or ''}".lower()
+    if not hay.strip():
+        return 0, 1
+    q = (query or "").strip().lower()
+    if not q:
+        return 0, 1
+    if CJK_RE.search(q) or KANA_RE.search(q):
+        # CJK/假名没有词边界：required 恒为 1，跨译名（终焉之莉莉→终结的百合花）
+        # 才能靠「命中一个字」通过。
+        chars = {ch for ch in q if CJK_RE.match(ch) or KANA_RE.match(ch)}
+        return sum(1 for ch in chars if ch in hay), 1
+    parts = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+    long_toks = [t for t in parts if len(t) >= 3]
+    # required：>=3 字的 token 全中才算数；全是短词（如 "AI"）时回落 1，
+    # 否则短查询永远是 0。
+    required = len(long_toks) or 1
+    pool = long_toks or parts
+    compact_hay = re.sub(r"[^a-z0-9]+", "", hay)
+    found = 0
+    for t in pool:
+        if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", hay):
+            found += 1
+        elif len(t) >= 5 and t in compact_hay:
+            found += 1
+    return found, required
+
+
+def _query_evidence_ok(
+    query: str, title: str, body_text: str
+) -> tuple[bool, int, int]:
+    """内容证据闸门：`(是否通过, 命中数, 所需命中数)`。
+
+    与 `_query_evidence` 的唯一区别是**门槛**：拉丁查询要求 >=3 字的 token
+    **全部**命中，而不是命中任一。真站实测（2026-10-18）：
+
+    | 站       | 查询            | token 命中             | `>0` 旧闸门 | 全中 |
+    |----------|-----------------|------------------------|-------------|------|
+    | acggw    | `summer clo`    | summer=YES, clo=NO     | 误放行 ❌   | 拦下 |
+    | galgamex | `summer clover` | summer=YES, clover=YES | 放行        | 放行 |
+
+    空 haystack / 空查询永远不通过（查询为空什么也证明不了）。
+    """
+    found, required = _evidence_counts(query, title, body_text)
+    return found >= required, found, required
+
+
 def _query_evidence(query: str, title: str, body_text: str) -> int:
     """查询词在详情页标题/正文里命中多少项（按语种给不同的计法）。
 
@@ -604,26 +667,25 @@ def _query_evidence(query: str, title: str, body_text: str) -> int:
         页面里的 "Ender Lilies"）；后者只对长度 >= 5 的词生效，防短词噪声。
         若查询里所有词都短于 3（如 "AI"），仍按整词判，否则短查询永远是 0。
       - 空 haystack / 空查询一律 0（查询为空什么也证明不了）。
+
+    回传语义保持旧版（命中数），仍被诊断与既有测试使用；**闸门判定**请用
+    `_query_evidence_ok` —— 它才是「全 token 命中」的那道门。
     """
-    hay = f"{title or ''} {body_text or ''}".lower()
-    if not hay.strip():
-        return 0
-    q = (query or "").strip().lower()
-    if not q:
-        return 0
-    if CJK_RE.search(q) or KANA_RE.search(q):
-        chars = {ch for ch in q if CJK_RE.match(ch) or KANA_RE.match(ch)}
-        return sum(1 for ch in chars if ch in hay)
-    parts = [t for t in re.split(r"[^a-z0-9]+", q) if t]
-    toks = [t for t in parts if len(t) >= 3] or parts
-    compact_hay = re.sub(r"[^a-z0-9]+", "", hay)
-    found = 0
-    for t in toks:
-        if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", hay):
-            found += 1
-        elif len(t) >= 5 and t in compact_hay:
-            found += 1
+    found, _required = _evidence_counts(query, title, body_text)
     return found
+
+
+def _page_content(page) -> str | None:
+    """读当前页 HTML；读不出来返回 None（页面被站点关掉/导航中会抛）。
+
+    调用方必须把 None 当**错误**处理，绝不能当「空结果页」—— 否则一次读失败
+    会被下游的「暂态」判定接手，最后谎报成 `NO_RESULTS`。
+    """
+    try:
+        html = page.content()
+    except Exception:  # noqa: BLE001
+        return None
+    return html if isinstance(html, str) else None
 
 
 def search_one(
@@ -637,8 +699,23 @@ def search_one(
     extra 里带全链路诊断（命中数、各级 HTTP 状态、拦截/无结果特征、匹配强度），
     冒烟脚本与将来的 UI 都靠它判断失败在哪一层。
     """
-    q, truncated = clamp_query(site, query)
+    q, truncated, mid_word = clamp_query_detail(site, query)
     extra: dict[str, Any] = {"truncated": truncated, "query_used": q, "mode": site.search.mode}
+    if mid_word:
+        # 拉丁词被站点上限拦腰切断（acggw `max_query_len: 10` 查 `summer clover`
+        # → `summer clo`）。半截词在页面上是别的游戏的子串，搜下去只会把
+        # 不相干的游戏挂给用户 —— 发请求之前就放弃，别浪费一次导航。
+        extra["query_truncation"] = "mid_word"
+        return GameDetail(
+            site_id=site.id,
+            url=site.homepage,
+            title="",
+            error=(
+                f"QUERY_TOO_LONG: {len(query)} > {site.max_query_len}, "
+                f"truncated to {q!r} mid-word"
+            ),
+            extra=extra,
+        )
 
     if site.search.mode == "index":
         # 索引站：没有可用搜索页，直接取整份索引在本地过滤。
@@ -685,7 +762,10 @@ def search_one(
         # 再来同样的请求就正常渲染出结果。**这类暂态必须先重试**，否则会把
         # 「站点抖了一下」永久记成 NO_RESULTS（还会进失败缓存）。
         for _retry in range(2):
-            html_now = page.content()
+            html_now = _page_content(page)
+            if html_now is None:
+                # 读不出页面 = 无法判定「暂态」，绝不能当成空结果页。
+                break
             # **已经有候选就不许重载**。`_TRANSIENT_TEXT_MIN` 是按「正文至少
             # 300 字」猜的，而 jidiyouxi 是 JS 渲染页：出结果时 `_visible_text`
             # 也只有 250 字 → 会被误判成暂态 → 重载把**已经拿到的结果冲掉**，
@@ -699,9 +779,12 @@ def search_one(
             # 光看 `_looks_transient` 会一直判暂态。等待后必须**重查候选**，
             # 否则等于每轮都无条件重载（这也是抖动的主要来源）。
             _settle(page, 4000)
-            if parse_result_links(page.content(), page.url, site):
+            html_now = _page_content(page)
+            if html_now is None:
                 break
-            if not _looks_transient(page.content()):
+            if parse_result_links(html_now, page.url, site):
+                break
+            if not _looks_transient(html_now):
                 break
             extra.setdefault("search_transient_retries", 0)
             extra["search_transient_retries"] += 1
@@ -726,6 +809,25 @@ def search_one(
         if not outcome.effective:
             # 关键：搜索没生效时，页面上的链接是首页内容（导航/推荐列表），
             # 当成结果会把「India Cats」这种无关游戏报成命中。
+            #
+            # 但「没生效」有两种成因，必须分开报：
+            #   (a) 表单真的没提交（选择器打偏、站点改版）→ FORM_FAILED，是缺陷。
+            #   (b) 站点**确实执行了搜索、并且明确回了「没有」** → touchgal 实测
+            #       查「夏色四叶草」逐字显示「未找到相關內容」，URL 不变、也不
+            #       新增锚点。站方已经给出了结论，报 FORM_FAILED 会误导用户
+            #       （看起来像工具坏了）。所以先复查站点自己的空结果文案。
+            # 注意 (b) 只在**没有候选**时成立：文案命中时页面里残留的首页链接
+            # 绝不是结果，仍然只能报 NO_RESULTS。
+            empty_marker = looks_no_results(_page_title(page), _page_content(page) or "")
+            if empty_marker:
+                extra["no_results_marker"] = empty_marker
+                return GameDetail(
+                    site_id=site.id,
+                    url=getattr(page, "url", site.homepage),
+                    title="",
+                    error=f"NO_RESULTS: {empty_marker}",
+                    extra=extra,
+                )
             return GameDetail(
                 site_id=site.id,
                 url=getattr(page, "url", site.homepage),
@@ -739,7 +841,17 @@ def search_one(
         status = None
 
     search_url = page.url
-    search_html = page.content()
+    search_html = _page_content(page)
+    if search_html is None:
+        # 页面读不出来 ≠ 没有结果。报错必须区分，否则一次读失败会被下游当成
+        # 空结果缓存 30 分钟（见缓存键约定），用户重试也拿不到真结果。
+        return GameDetail(
+            site_id=site.id,
+            url=search_url or site.homepage,
+            title="",
+            error="PAGE_READ_FAILED: could not read search page HTML",
+            extra=extra,
+        )
     search_title = _page_title(page)
     search_block = looks_blocked(search_title, search_html)
     marker = looks_no_results(search_title, search_html)
@@ -856,7 +968,17 @@ def _extract_detail(
         d_status, d_nav_error = _goto(page, target_url, timeout_ms, retries=2)
         _settle(page)
     detail_url = page.url
-    detail_html = page.content()
+    detail_html = _page_content(page)
+    if detail_html is None:
+        extra.update({"detail_url": detail_url, "detail_status": d_status,
+                      "detail_nav_error": d_nav_error or "content unavailable"})
+        return GameDetail(
+            site_id=site.id,
+            url=detail_url or target_url,
+            title="",
+            error="PAGE_READ_FAILED: could not read detail page HTML",
+            extra=extra,
+        )
     detail_block = looks_blocked(_page_title(page), detail_html)
     extra.update({"detail_url": detail_url, "detail_status": d_status,
                   "detail_body_len": len(detail_html)})
@@ -898,13 +1020,25 @@ def _extract_detail(
     # 会选中「Switch 固件整合包」——标题里 0 个查询词，却挂着 3 条真实网盘链接。
     # 这种卡片对用户是「下载错游戏」，必须报错，绝不能当成功返回。
     body_text = _detail_body_text(page, detail_html)
-    evidence = _query_evidence(q, card.title, body_text)
+    evidence_ok, evidence_found, evidence_required = _query_evidence_ok(
+        q, card.title, body_text
+    )
+    evidence = evidence_found
     card.extra["evidence"] = evidence
+    card.extra["evidence_found"] = evidence_found
+    card.extra["evidence_required"] = evidence_required
     card.extra["detail_text_len"] = len(body_text or "")
-    if evidence == 0:
+    if not evidence_ok:
         card.extra["wrong_game"] = True
         card.downloads = []          # 关键：不挂任何下载链接
         card.error = "WRONG_GAME: no query evidence in page"
+        # 选错游戏时**绝不能**把那个游戏的标题留在卡片上：卡片上挂着真网盘链
+        # 加一个不相干的标题，用户看起来就是「找到了」。原值留进 extra 供诊断。
+        # 注意取值口径是「原始 picked title」——即使它是空串也要留键，方便
+        # 排查「抽不到标题」和「抽到别的标题」两种成因。
+        card.extra["wrong_game_title"] = card.title
+        card.extra["wrong_game_url"] = detail_url
+        card.title = ""
         return card
 
     if not card.downloads:
@@ -926,11 +1060,26 @@ def _extract_detail(
             card.downloads = _fetch_inarigal_links(
                 page, site, timeout_ms, extra
             )
+        elif site.search.download_flow == "popup_redirect":
+            # galgamex 实测：详情页 HTML 里没有任何下载链，链接由 JS 现场生成，
+            # 必须点「资源下载」标签页 + 供应商按钮，从 `/redirect?url=` 里解。
+            card.downloads = _fetch_popup_redirect_links(
+                page, site, timeout_ms, extra
+            )
         if site.search.torrent_selector:
             card.downloads = card.downloads + _fetch_torrent_magnets(
                 page, site, timeout_ms, extra
             )
-        followed = _follow_detail_gate(page, site, detail_url, timeout_ms, extra)
+        # `_follow_detail_gate` 只是「还没拿到链接」时的兜底（touchgal 的
+        # resource 页、kungal 的就地展开）。**已经有链接就绝不能再调它**：
+        # 它的 reveal_only 分支会从当前页重新抽卡并**整体替换**返回值，
+        # 把 download_flow 刚辛苦点出来的链接全丢掉（galgamex 实测踩到）。
+        # popup_redirect 流程自己就负责点开标签页，也不能再被兜底重复点一次。
+        followed = (
+            _follow_detail_gate(page, site, detail_url, timeout_ms, extra)
+            if not card.downloads and site.search.download_flow != "popup_redirect"
+            else None
+        )
         if followed is not None:
             return followed
         card.extra.update(extra)
@@ -1339,6 +1488,227 @@ def _fetch_ankergames_link(
         return _fail("link: missing")
     extra["ank_link_len"] = len(link)
     return [Download(kind="direct", url=link, label="直链")]
+
+
+# 供应商按钮最多点几个。galgamex 实测一页最多 10 个供应商（百度/夸克/阿里/迅雷/
+# 天翼/移动/123/MEGA/GDrive/OneDrive），留一点余量；再多就是页面结构变了，
+# 把按钮全点一遍只会拖慢并触发风控。
+MAX_PROVIDER_CLICKS = 12
+
+# 点完供应商按钮后等跳转的节奏。实测（2026-10-20，`/game/cbe7d89e`）：
+# 「分卷」按钮是直接 `<a download>` 式跳转，几十毫秒内 route 就命中；
+# 「百度网盘」要先开弹窗再跳，固定等 400ms 会**漏掉它**（真机复现过）。
+_PROVIDER_WAIT_MS = 4000
+_PROVIDER_POLL_MS = 200
+
+
+def _decode_redirect_target(url: str) -> str:
+    """从站内跳转链里解出真实目标；本来就不是跳转链就原样返回。
+
+    galgamex 实测形状（2026-10-18，`https://www.galgamex.net/game/cbe7d89e`）：
+        https://www.galgamex.net/redirect?url=https%3A%2F%2Fpan.baidu.com%2F...
+        → unquote(url 参数) = https://pan.baidu.com/s/1aCmoplMimsXAb16i9tfP_A?pwd=us6i
+    注意**不能**无条件再 unquote 一次：目标里自带 `%2F` 这类编码时会被解坏。
+    只有当参数值看起来仍是整串百分号编码时才补一次。
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:  # noqa: BLE001
+        return raw
+    if not parsed.query:
+        return raw
+    try:
+        qs = parse_qs(parsed.query)
+    except Exception:  # noqa: BLE001
+        return raw
+    for key in ("url", "u", "target", "to", "link", "redirect", "goto"):
+        vals = qs.get(key) or []
+        if not vals:
+            continue
+        cand = (vals[0] or "").strip()
+        if not cand:
+            continue
+        # parse_qs 已经解过一次；若结果仍是 `https%3A%2F%2F...` 这种整串编码，
+        # 说明站点做了双重编码，再解一次。
+        if cand.lower().startswith("http%3a") or cand.lower().startswith("https%3a"):
+            cand = unquote(cand)
+        # 参数存在就**以它为准**（哪怕是个 `javascript:void(0)` 之类的水货）：
+        # 交给 `_is_real_download_url` 判真伪，绝不能退回去把跳转链本身当下载链。
+        return cand
+    return raw
+
+
+def _is_real_download_url(url: str) -> bool:
+    """跳转解析出来的目标是不是一条**真下载链**（不是图标、不是 javascript:）。"""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    if ASSET_URL_RE.search(url):
+        return False
+    return True
+
+
+def _fetch_popup_redirect_links(
+    page, site: Site, timeout_ms: int, extra: dict[str, Any]
+) -> list[Download]:
+    """galgamex：下载按钮点开是**弹窗 + 站内跳转**，链接由 JS 现场生成。
+
+    真站实测（2026-10-18，`https://www.galgamex.net/game/cbe7d89e`）：
+      - 详情页原始 HTML 里**搜不到任何** `/redirect?url=`（48 个锚点里没有一条
+        是下载链）—— 抽 HTML 永远抽不到，必须真的点。
+      - 点「资源下载」标签页后出现供应商按钮（百度网盘 / 夸克 / 阿里云盘 …）；
+        点按钮开新窗口，URL 是 `https://www.galgamex.net/redirect?url=<真链>`，
+        同时打 `POST /api/game/resource/<id>/download`。
+      - 取链手段选**路由拦截**：`context.route("**/redirect*")` 读到 URL 后
+        `route.abort()` —— 根本不加载网盘页（省流量、不触发网盘风控），
+        比接 popup 更稳。路由偶尔没拦住（`window.open` 直接开新页）时用
+        popup 兜底，并立刻 close。
+
+    纪律：
+      - 单个按钮坏了（不可点/超时）只记 `extra["galgamex_errors"]`，**不能**
+        拖死其它按钮 —— 供应商按钮是彼此独立的。
+      - 重复 provider 去重（同一 URL 只留一条）。
+      - 没有 selector 时返回空且不抛（站点配置缺失是配置问题，不是崩溃）。
+    """
+    errs: list[str] = []
+    selector = site.search.download_open_selector or ""
+    if not selector:
+        extra["galgamex_errors"] = errs + ["selector: empty"]
+        return []
+
+    context = getattr(page, "context", None)
+    captured: list[str] = []
+    popups: list[Any] = []
+
+    def _on_route(route) -> None:
+        try:
+            url = getattr(getattr(route, "request", None), "url", "") or ""
+        except Exception:  # noqa: BLE001
+            url = ""
+        target = _decode_redirect_target(url)
+        if target:
+            captured.append(target)
+        try:
+            route.abort()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_page(popup) -> None:
+        popups.append(popup)
+
+    routed = False
+    if context is not None:
+        try:
+            context.route("**/redirect*", _on_route)
+            routed = True
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"route: {type(exc).__name__}")
+        try:
+            context.on("page", _on_page)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"listen: {type(exc).__name__}")
+
+    try:
+        # 1. 先点开「资源下载」标签页：供应商按钮在这一步之后才渲染。
+        open_sel = site.search.detail_open_selector
+        if open_sel:
+            try:
+                opener = _first_visible(page, open_sel)
+                if opener is not None:
+                    opener.click(timeout=min(timeout_ms, 8000))
+                    page.wait_for_timeout(2000)
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"open: {type(exc).__name__}")
+
+        # 2. 逐个点供应商按钮，从路由/popup 里收真实网盘 URL。
+        out: list[Download] = []
+        seen: set[str] = set()
+        try:
+            loc = page.locator(selector)
+            total = loc.count()
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"locator: {type(exc).__name__}")
+            loc, total = None, 0
+        if loc is not None and total == 0:
+            errs.append("buttons: none")
+
+        clicks = 0
+        for i in range(min(total, MAX_PROVIDER_CLICKS)):
+            try:
+                btn = loc.nth(i) if hasattr(loc, "nth") else loc.first
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"nth[{i}]: {type(exc).__name__}")
+                continue
+            try:
+                if hasattr(btn, "is_visible") and not btn.is_visible(timeout=500):
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+
+            captured.clear()
+            popups.clear()
+            try:
+                btn.click(timeout=min(timeout_ms, 8000))
+                clicks += 1
+            except Exception as exc:  # noqa: BLE001
+                # 单个按钮坏掉不影响其它按钮（真站有供应商按钮不可点）
+                errs.append(f"click[{i}]: {type(exc).__name__}")
+                continue
+
+            # 路由拦截是同步的，但 popup 往往要等几百毫秒才发起跳转。
+            # 实测（2026-10-20）：固定等 400ms 会漏掉「百度网盘」这类最后一个
+            # 供应商按钮 —— 它开了弹窗才跳转，400ms 内 route 还没被触发。
+            # 所以改成**轮询**：拿到候选或弹窗就立刻收工，最多等 _PROVIDER_WAIT_MS。
+            waited = 0
+            while waited < _PROVIDER_WAIT_MS and not captured and not popups:
+                try:
+                    page.wait_for_timeout(_PROVIDER_POLL_MS)
+                except Exception:  # noqa: BLE001
+                    break
+                waited += _PROVIDER_POLL_MS
+            if captured or popups:
+                # 命中后仍给一点余量，让同一按钮的重复跳转（真站会跳两次）落齐。
+                try:
+                    page.wait_for_timeout(_PROVIDER_POLL_MS)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            candidates = list(captured)
+            for popup in popups:
+                try:
+                    purl = getattr(popup, "url", "") or ""
+                except Exception:  # noqa: BLE001
+                    purl = ""
+                if purl:
+                    candidates.append(_decode_redirect_target(purl))
+                try:
+                    popup.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            popups.clear()
+
+            for cand in candidates:
+                if not _is_real_download_url(cand):
+                    continue
+                if cand in seen:
+                    continue
+                seen.add(cand)
+                out.append(Download(kind=_classify(cand), url=cand, label="网盘"))
+    finally:
+        if routed:
+            try:
+                context.unroute("**/redirect*")
+            except Exception:  # noqa: BLE001
+                pass
+
+    extra["galgamex_clicks"] = clicks
+    if errs:
+        extra["galgamex_errors"] = errs
+    if not out:
+        extra.setdefault("galgamex_errors", errs + ["links: none"])
+    return out
 
 
 def _follow_detail_gate(

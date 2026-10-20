@@ -182,9 +182,26 @@ sites:
     homepage: "https://www.galgamex.net/"
     kinds: [直链, 网盘]
     langs: [zh, en, ja]
+    # 实测 2026-10-18：详情页 /game/{id} 原始 HTML 里**一条下载链都没有**
+    # （48 个锚点逐一看过，全是导航/封面）。资源是 JS 现场生成的：
+    #   1. 点「资源下载」标签页 → 渲染出供应商按钮（百度网盘 / 夸克 / …）；
+    #   2. 点供应商按钮 → 开新窗口 `https://www.galgamex.net/redirect?url=<真链>`，
+    #      同时打 POST /api/game/resource/<id>/download。
+    # 所以必须走 popup_redirect 流程（路由拦截 + popup 兜底），不能靠抽 HTML。
     search:
       mode: url
       url_template: "https://www.galgamex.net/search?q={q}"
+      download_flow: popup_redirect
+      detail_open_selector: "button:has-text('资源下载')"
+      # 实测 2026-10-20（Playwright 真机，`/game/cbe7d89e`）：资源卡片里
+      # 「分卷 1 / 分卷 2 / 百度网盘」三个按钮的 class **完全相同**（shadcn 的
+      # 一长串工具类），靠 class 区分不了，只能靠 `data-variant` + `data-size`：
+      #   - 资源按钮：data-variant="default" data-size="sm"（实测恰好 3 个）
+      #   - 「复制」：data-variant="ghost"（必须排除，点了不出链）
+      #   - 顶部「登录」「正版购买」：data-size="default"（size 过滤掉）
+      # 用 `a.download-provider` 是错的：真站根本没有 <a>，全是 <button>，
+      # 且静态 HTML 里 `download-provider` 出现 0 次（纯客户端渲染）。
+      download_open_selector: "button[data-slot='button'][data-variant='default'][data-size='sm']"
 
   - id: kungal
     name: 鲲 Galgame

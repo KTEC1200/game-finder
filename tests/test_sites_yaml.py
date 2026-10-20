@@ -78,3 +78,37 @@ def test_filter_by_lang_returns_participating_and_skipped(sites):
     assert len(part) + len(skipped) == 19
     assert all("ja" in s.langs for s in part)
     assert all("ja" not in s.langs for s in skipped)
+
+
+def test_popup_redirect_sites_have_both_selectors(sites):
+    """`popup_redirect` 流程少任何一个 selector 都只会静默返回空列表。
+
+    真站实测（2026-10-20）：缺 `download_open_selector` 时
+    `_fetch_popup_redirect_links` 直接 `return []` 并记 `selector: empty` ——
+    用户看到的是「这个站没链」，实际是配置漏了。所以在配置层就锁死。
+    """
+    for s in sites:
+        if s.search.download_flow != "popup_redirect":
+            continue
+        assert s.search.detail_open_selector, f"{s.id} needs detail_open_selector"
+        assert s.search.download_open_selector, f"{s.id} needs download_open_selector"
+
+
+def test_galgamex_selector_is_the_measured_one(sites):
+    """galgamex 的选择器必须是真机量出来的那个，不能退回猜的 `a.download-provider`。
+
+    真机事实（2026-10-20，Playwright 直连 `/game/cbe7d89e`）：
+      - 静态 HTML 里 `download-provider` 出现 **0 次**，供应商控件全是 `<button>`；
+      - 资源卡片里「分卷 1 / 分卷 2 / 百度网盘」三个按钮的 class **完全相同**，
+        只有 `data-variant`（资源=default / 复制=ghost）与 `data-size`
+        （资源=sm / 顶部「登录」=default）能把它们分开；
+      - 该选择器在真站恰好匹配 3 个元素，且 3 个都能产出 `/redirect`。
+    """
+    by_id = {s.id: s for s in sites}
+    gal = by_id["galgamex"]
+    assert gal.search.download_flow == "popup_redirect"
+    assert gal.search.download_open_selector == (
+        "button[data-slot='button'][data-variant='default'][data-size='sm']"
+    )
+    assert "download-provider" not in (gal.search.download_open_selector or "")
+    assert gal.search.detail_open_selector == "button:has-text('\u8d44\u6e90\u4e0b\u8f7d')"

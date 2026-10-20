@@ -145,7 +145,17 @@ def _classify(url: str) -> str:
     # —— 站点把直链放在自家对象存储上，URL 里没有 download 之类的词。
     # 只认压缩包/镜像/可执行这三类「一定是下载物」的扩展名，
     # 避免把 .html/.php 详情页判成下载（`.webp` 封面同理已由 ASSET_URL_RE 挡掉）。
-    if re.search(r"\.(?:rar|zip|7z|tar|gz|xz|iso|bin|img|apk|exe|msi|dmg)$", parsed.path, re.I):
+    # 分卷包也算：galgamex 实测 `Gamex-005103/%23A8824.z01`（7z 分卷）与
+    # `%23A8824.zip` 成对出现，只认 `.zip` 会把第一卷判成 unknown。
+    # `game.7z.001` 这种「归档名 + 三位序号」同样要认，但序号必须**跟在**已知
+    # 归档扩展名后面，避免把 `/page/001` 这类路径误判成下载。
+    if re.search(
+        r"(?:\.(?:rar|zip|7z|tar|gz|xz|iso|bin|img|apk|exe|msi|dmg"
+        r"|z\d{2,3}|r\d{2,3}|part\d+)"
+        r"|\.(?:rar|zip|7z|tar)\.\d{3})$",
+        parsed.path,
+        re.I,
+    ):
         return "direct"
     return "unknown"
 
