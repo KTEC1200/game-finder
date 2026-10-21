@@ -119,7 +119,7 @@ python tools/build_portable.py
 ## 开发
 
 ```bash
-python -m pytest -q          # 511 个离线测试，约 7 秒
+python -m pytest -q          # 517 个离线测试，约 6 秒
 ```
 
 设计细节、踩过的坑、站点适配状态都在 [`PROGRESS.md`](PROGRESS.md)。

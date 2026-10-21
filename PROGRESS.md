@@ -32,7 +32,7 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **511 个离线测试全绿**（2026-10-21 复跑；新增 33 例锁定免代理回退 + 打包路径，43 例锁定引擎兜底） |
+| 代码 / 测试 | ✅ **517 个离线测试全绿**（2026-10-21 复跑；新增 33 例免代理回退 + 打包路径，43 例引擎兜底，6 例启动器 CLI） |
 | 免代理 | ✅ **自动探测 + 回退直连**：`proxy.auto_detect` 探 6234，不通就直连（实测 18/19 站直连可用） |
 | 便携版 | ✅ **PyInstaller onedir + zip**，142.8 MB / 60.9 MB 压缩包，解压双击即用，已在新路径实测 |
 | 引擎兜底 | ✅ 有下载链接的站点 < 3 时，结果区上方给必应/百度/谷歌/Yandex **跳转链接**（只拼 URL，不发请求） |
@@ -439,6 +439,16 @@ Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就�
     静态测试 `tests/test_ui_engines.py` 锁住这条（以及「容器必须在 `<main>` 之前」、
     「链接必须过 `safeUrl()`」）。
 
+42. **打包验收脚本要指定端口，但 `app.py` 没有 `--port`**
+    写 `tools/probe_packaged_engines.py` 时想用 `game-finder.exe --port 8795`
+    避开用户正在跑的服务，结果 exe 直接
+    `error: unrecognized arguments: --port 8795` 退出，验收脚本报
+    「packaged server did not start」——看起来像打包坏了，其实是参数不存在。
+    修法：`app.py` 加 `--port`（覆盖 `server.port`，被占仍自动往后找），
+    并补 `tests/test_app_cli.py` 6 例锁住「`--port` 生效 / 缺省用 config /
+    `--check` 不起服务 / `--no-browser` 不开浏览器」。
+    **教训**：验收脚本自己也是代码，报错先怀疑脚本与产物的接口对不上。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -538,7 +548,7 @@ Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就�
 ## 八、代码地图
 
 ```
-app.py                      启动 uvicorn + 开浏览器；--check 诊断；--no-browser
+app.py                      启动 uvicorn + 开浏览器；--check 诊断；--no-browser；--port 覆盖端口
 config.yaml                 profile 路径、代理（auto_detect）、超时
 sites.yaml                  21 站注册表
 game-finder.spec            PyInstaller 打包定义（onedir）
@@ -561,9 +571,10 @@ finder/health.py            classify / check_site（状态机就绪，无定时�
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新；有链接站点 < 3 时发 engines 帧
 finder/web/static/index.html  单页 UI（含结果区上方的引擎兜底块）
-tests/                      511 个离线测试 + fixtures
+tests/                      517 个离线测试 + fixtures
 tools/build_portable.py     构建便携版 + 打 zip
 tools/probe_engines_ui.py   真机验证引擎兜底块（真 Chrome + 真服务，结果写 JSON）
+tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal 里的静态资源）
 ```
 
 ---
@@ -643,6 +654,10 @@ tools/probe_engines_ui.py   真机验证引擎兜底块（真 Chrome + 真服务
   `tools/probe_engines_ui.py` 起真服务 + 真 Chrome，读 `getComputedStyle(...).display`、
   每个按钮的 `href`、以及 `compareDocumentPosition` 判 DOM 顺序 —— 实测「终焉之莉莉」
   2/14 出链 → 兜底块 `display:block`、4 个链接 CJK 编码正确、`engines_before_results: true`。
+- **源码真机绿 ≠ 打包版真机绿**：静态资源在打包后来自 `_internal/`，
+  spec 的 datas 若漏收改动，界面上就是旧的。`tools/probe_packaged_engines.py`
+  跑**解压后的 exe** 做同一套断言，本轮实测同样 2/14 → `display:block`。
+  打包验收 = 「新路径解压 → `--check` → 起服务 → 真跑一次搜索 → 看 UI 元素」。
 
 
 ### 已完成的基础设施

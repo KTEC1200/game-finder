@@ -93,6 +93,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="只打印环境诊断信息然后退出（不启动服务）")
     parser.add_argument("--no-browser", action="store_true",
                         help="不自动打开浏览器标签页")
+    parser.add_argument("--port", type=int, default=None,
+                        help="覆盖 config.yaml 里的 server.port（被占仍会自动往后找）")
     args = parser.parse_args(argv)
 
     root = paths.ensure_runtime_files()
@@ -109,7 +111,8 @@ def main(argv: list[str] | None = None) -> None:
     _preflight(cfg)
 
     host = cfg["server"]["host"]
-    port = _pick_port(host, int(cfg["server"]["port"]))
+    preferred = args.port if args.port else int(cfg["server"]["port"])
+    port = _pick_port(host, preferred)
     url = f"http://{host}:{port}/"
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
