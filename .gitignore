@@ -1,13 +1,28 @@
 __pycache__/
 *.pyc
+
+# 运行态数据（本机产生，不进仓库）
 data/
+logs/
 chrome-profile/
 chrome-profile-w*/
 chrome-profile-sweep*/
+run.log
+run2.log
+tools/packaged_run_*.txt
+
+# 打包产物
+build/
+dist/
+*.spec.bak
+
+# 一次性探针的输出
 tools/_gf_*/
+tools/_probe_*/
 tools/probe_*.json
 tools/_*.txt
 tools/_*.html
 tools/_*.js
 tools/_*.json
+
 .superpowers/

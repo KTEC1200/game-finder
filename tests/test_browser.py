@@ -18,6 +18,7 @@ from finder.browser import (
     BrowserSession,
     build_user_agent,
     chrome_default_profile_dir,
+    find_chrome,
     is_chrome_default_profile,
     read_chrome_version,
     resolve_profile_dir,
@@ -149,6 +150,42 @@ def test_default_chrome_path_is_the_measured_one():
     assert DEFAULT_CHROME == CHROME
 
 
+def test_find_chrome_prefers_configured_path(tmp_path):
+    from finder.browser import find_chrome
+
+    fake = tmp_path / "chrome.exe"
+    fake.write_bytes(b"MZ")
+    assert find_chrome(str(fake)) == str(fake)
+
+
+def test_find_chrome_falls_back_when_configured_missing(tmp_path, monkeypatch):
+    """配置里写的是别人机器上的路径时，要能按候选表找到本机 Chrome。"""
+    import finder.browser as browser_mod
+
+    fake = tmp_path / "found.exe"
+    fake.write_bytes(b"MZ")
+    monkeypatch.setattr(browser_mod, "CHROME_CANDIDATES", (str(fake),))
+    assert find_chrome(str(tmp_path / "nope.exe")) == str(fake)
+
+
+def test_find_chrome_returns_none_when_nothing_exists(tmp_path, monkeypatch):
+    import finder.browser as browser_mod
+
+    monkeypatch.setattr(browser_mod, "CHROME_CANDIDATES", ())
+    assert find_chrome(str(tmp_path / "nope.exe")) is None
+
+
+def test_find_chrome_accepts_empty_config(tmp_path, monkeypatch):
+    """chrome_path 留空（便携版默认）也必须能找到。"""
+    import finder.browser as browser_mod
+
+    fake = tmp_path / "found.exe"
+    fake.write_bytes(b"MZ")
+    monkeypatch.setattr(browser_mod, "CHROME_CANDIDATES", (str(fake),))
+    assert find_chrome("") == str(fake)
+    assert find_chrome(None) == str(fake)
+
+
 # --------------------------------------------------------------------------
 # BrowserSession 生命周期（替身，不启动真浏览器）
 # --------------------------------------------------------------------------
@@ -197,6 +234,9 @@ def fake_pw(monkeypatch):
     monkeypatch.setattr(browser_mod, "sync_playwright", lambda: fake)
     # 固定版本，避免测试结果依赖本机 Chrome 是否升级
     monkeypatch.setattr(browser_mod, "read_chrome_version", lambda _p: "155.0.8059.80")
+    # 代理探活也固定成「端口活着」：否则这些用例会随「本机代理开没开」飘。
+    # 回退直连的行为由 test_session_falls_back_to_direct_when_proxy_dead 单独测。
+    monkeypatch.setattr(browser_mod.proxy_mod, "probe_alive", lambda *a, **k: True)
     return fake
 
 
@@ -274,10 +314,48 @@ def test_session_without_proxy_when_disabled(fake_pw, tmp_path):
     sess.close()
 
 
-def test_session_raises_when_chrome_missing(fake_pw, tmp_path):
+def test_session_falls_back_to_direct_when_proxy_dead(fake_pw, tmp_path, monkeypatch):
+    """代理开着但端口没人听 → 直连，而不是让所有站点 ERR_PROXY_CONNECTION_FAILED。
+
+    这是本次改动的核心：config 里 enabled=true 但代理没开，是最常见的
+    第一次运行失败原因（实测 18/19 站直连可用）。
+    """
+    import finder.browser as browser_mod
+
+    monkeypatch.setattr(browser_mod.proxy_mod, "probe_alive", lambda *a, **k: False)
+    sess = BrowserSession(_cfg(), tmp_path)
+    sess.__enter__()
+    assert "proxy" not in fake_pw.kwargs
+    sess.close()
+
+
+def test_session_uses_proxy_when_forced(fake_pw, tmp_path, monkeypatch):
+    """auto_detect=false 时即使端口不通也必须照旧传代理（旧行为要留得住）。"""
+    import finder.browser as browser_mod
+
+    monkeypatch.setattr(browser_mod.proxy_mod, "probe_alive", lambda *a, **k: False)
+    cfg = _cfg()
+    cfg["proxy"] = {"enabled": True, "server": "http://127.0.0.1:6234",
+                    "auto_detect": False}
+    sess = BrowserSession(cfg, tmp_path)
+    sess.__enter__()
+    assert fake_pw.kwargs["proxy"] == {"server": "http://127.0.0.1:6234"}
+    sess.close()
+
+
+def test_session_raises_when_chrome_missing(fake_pw, tmp_path, monkeypatch):
+    """配置路径失效 + 所有兜底候选都不存在 → 报错并给出安装指引。
+
+    必须把 CHROME_CANDIDATES 清空再测：否则本机真装着 Chrome 时兜底会成功，
+    测试就变成「验证这台机器装了 Chrome」，与要测的契约无关。
+    """
+    import finder.browser as browser_mod
+
+    monkeypatch.setattr(browser_mod, "CHROME_CANDIDATES", ())
     cfg = _cfg(chrome_path=str(tmp_path / "nope.exe"))
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError) as exc:
         BrowserSession(cfg, tmp_path).__enter__()
+    assert "Chrome" in str(exc.value)
 
 
 def test_close_closes_context_and_stops_playwright(fake_pw, tmp_path):

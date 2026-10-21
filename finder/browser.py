@@ -20,11 +20,36 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import proxy as proxy_mod
 from .models import Site
 
 DEFAULT_CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 ANTI_BOT_ARGS = ["--disable-blink-features=AutomationControlled"]
 FALLBACK_CHROME_VERSION = "155.0.0.0"
+
+# 便携版要能在「config.yaml 里写的是别人机器上的路径」时也跑起来，
+# 所以配置路径失效后按这几处再找一遍（按优先级）。
+CHROME_CANDIDATES = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+)
+
+
+def find_chrome(configured: str | None = None) -> str | None:
+    """返回一个真实存在的 chrome.exe 路径；找不到返回 None。
+
+    先认配置里的路径，再按 CHROME_CANDIDATES 兜底。**只认系统 Chrome**：
+    实测 Playwright 自带 Chromium 过不了 touchgal 的 Cloudflare 挑战
+    （403 / `Just a moment...`），而系统 Chrome 可以。
+    """
+    if configured and Path(configured).exists():
+        return str(configured)
+    for cand in CHROME_CANDIDATES:
+        if cand and Path(cand).exists():
+            return str(cand)
+    return None
+
 
 _VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:\.\d+)?)\b")
 
@@ -282,9 +307,14 @@ class BrowserSession:
 
     def __enter__(self) -> "BrowserSession":
         b = self._cfg.get("browser") or {}
-        chrome_path = str(b.get("chrome_path") or DEFAULT_CHROME)
-        if not Path(chrome_path).exists():
-            raise FileNotFoundError(f"chrome not found: {chrome_path}")
+        configured = str(b.get("chrome_path") or DEFAULT_CHROME)
+        chrome_path = find_chrome(configured)
+        if chrome_path is None:
+            raise FileNotFoundError(
+                "chrome not found. 本程序只依赖系统安装的 Google Chrome"
+                "（Playwright 自带 Chromium 过不了部分站点的 Cloudflare 挑战）。"
+                f"已尝试：{configured}；" + "；".join(p for p in CHROME_CANDIDATES if p)
+            )
 
         if self._profile_override is not None:
             profile = Path(self._profile_override)
@@ -311,8 +341,12 @@ class BrowserSession:
         }
         px = self._cfg.get("proxy") or {}
         if px.get("enabled") and px.get("server"):
-            # 约束 2：显式传，不依赖 Chrome 继承系统代理
-            kwargs["proxy"] = {"server": str(px["server"])}
+            # 约束 2：显式传，不依赖 Chrome 继承系统代理。
+            # 代理没开时自动回退直连（实测 18/19 站直连可用），而不是让
+            # 整个搜索因 ERR_PROXY_CONNECTION_FAILED 全线失败。
+            decision = proxy_mod.apply(self._cfg)
+            if decision.server:
+                kwargs["proxy"] = {"server": decision.server}
 
         self.profile_dir = profile
         self.user_agent = ua

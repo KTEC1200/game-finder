@@ -1,15 +1,21 @@
 # Game Finder — 实现进度与真实状态
 
-> 更新：2026-10-18（缓存 + 并发落地，实测于 commit `1a209ab` 之后）
+> 更新：2026-10-21（免代理自动回退 + Windows 便携版打包，实测于 commit `77fce60` 之后）
 > 项目根目录：`C:\Users\27025\Desktop\game-finder\`
 > 设计文档：`docs\superpowers\specs\2026-10-16-game-finder-design.md`
 > 实现计划：`docs\superpowers\plans\2026-10-17-game-finder-implementation.md`
+> 使用说明：`README.md`（面向拿到 zip 的用户）
 
 **这份文档只写实测到的事实。凡是没测过的，标注「未实测」。**
 
 ---
 
 ## 一、怎么启动
+
+**便携版（用户拿到 zip）**：解压 → 双击 `game-finder.exe`。首次运行在 exe 旁边
+生成 `config.yaml` / `sites.yaml` / `data/` / `logs/`。详见 `README.md`。
+
+**从源码**：
 
 ```powershell
 cd C:\Users\27025\Desktop\game-finder
@@ -18,13 +24,17 @@ python app.py
 
 浏览器自动打开 `http://127.0.0.1:8734/`。输入游戏名（中文/英文/日文均可），点搜索。
 
+诊断：`python app.py --check`（打印运行形态 / 路径 / Chrome 版本，不启动服务）。
+
 ---
 
 ## 二、状态总览
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **435 个离线测试全绿**（2026-10-20 复跑；新增 47 例锁定 W4 五项修复 + 8 例分卷/配置锁定） |
+| 代码 / 测试 | ✅ **468 个离线测试全绿**（2026-10-21 复跑；新增 33 例锁定免代理回退 + 打包路径） |
+| 免代理 | ✅ **自动探测 + 回退直连**：`proxy.auto_detect` 探 6234，不通就直连（实测 18/19 站直连可用） |
+| 便携版 | ✅ **PyInstaller onedir + zip**，142.8 MB / 60.9 MB 压缩包，解压双击即用，已在新路径实测 |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 + 换名提示 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
@@ -367,6 +377,39 @@ python app.py
     一律走已有的 `_page_content()` 助手（读不出返回 None），None 时报
     `PAGE_READ_FAILED`，**绝不**当空结果。
 
+### 2026-10-21 第三轮（免代理 + 便携版）
+
+35. **代理没开 → 全部站点失败**（最常见的第一次运行失败原因）
+    `config.yaml` 里 `proxy.enabled: true` + 固定 `http://127.0.0.1:6234`。
+    用户没开本地代理时，每个 `BrowserSession` 都带 `proxy` 参数，全部站点
+    报 `ERR_PROXY_CONNECTION_FAILED`，看起来像「程序坏了」。
+    实测（`tools/probe_no_proxy_run.py`，完整 `run()`）：
+    **19 站里 18 站直连可用**，只有 nyaa(sukebei.nyaa.si) 直连超时。
+    修法：新增 `finder/proxy.py`（`parse_server` / `probe_alive` / `resolve` /
+    `apply`），启动时探一次 TCP 端口（0.5s，进程内缓存），活着用代理、
+    死了直连并打日志；`proxy.auto_detect: false` 可退回旧行为。
+    **代理只在真正需要 nyaa 时才是必需的。**
+
+36. **打包后 `ROOT` 指向 PyInstaller 临时目录 → 用户数据全丢**
+    `finder/web/server.py` 原来用 `Path(__file__).parent.parent.parent`。
+    onedir 打包后这个路径落在 `_internal/`（或 `_MEIPASS` 临时目录），
+    `config.yaml` 改了没用、`data/finder.db` 写不进去、Chrome profile 每次重建。
+    修法：新增 `finder/paths.py`，把「只读资源」（`bundle_root()`）与
+    「可写数据」（`app_root()` = exe 旁边）分开；首次运行
+    `ensure_runtime_files()` 从 `_internal/` 复制 `config.yaml`/`sites.yaml`
+    到 exe 旁边，**已存在的绝不覆盖**（升级不吞用户改动）。
+
+37. **Playwright 自带 Chromium 过不了 Cloudflare**（所以不打包浏览器）
+    `tools/probe_bundled_chromium.py` 实测 6 个 CF 站：
+    galgamex / gamer520 / ankergames / iacg / anime-sharing 都 200，
+    但 **touchgal 403 `Just a moment...`（6059 字节、0 锚点）**；
+    系统 Chrome 访问同一页正常。打包自带浏览器 = +150 MB 体积 + 更差的结果，
+    所以只依赖系统 Chrome，找不到时给中文安装指引（`app.py::_preflight`）。
+
+38. **`uvicorn.run("finder.web.server:app")` 字符串形式在打包后失效**
+    打包后没有可导入的模块路径，必须传 app 对象：
+    `from finder.web.server import app as fastapi_app` + `uvicorn.run(fastapi_app, ...)`。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -429,11 +472,14 @@ python app.py
 ## 七、环境
 
 - Chrome：`C:\Program Files\Google\Chrome\Application\chrome.exe`，版本 **155.0.8059.80**
+  （2026-10-21 打包验证时本机已是 **155.0.8059.86**，UA 由 `read_chrome_version` 现读）
 - **不能复用默认 profile**：Chrome ≥136 拒绝为默认 user-data-dir 开 DevTools，
   报 `DevTools remote debugging requires a non-default data directory`。
   用专用 profile `game-finder\chrome-profile`（首次需手动登录目标站，cookie 会持久化）。
 - **代理必须显式传** `http://127.0.0.1:6234`（系统代理端口，不是 7890）。
   实测：不传 proxy 跟随系统 4/5 站，显式传 5/5 站。
+  **2026-10-21 补充**：这只是「需要代理时」的要求；实测 18/19 站直连可用，
+  所以默认改为自动探测 + 回退直连（见缺陷 35）。
 - **UA 必须显式设成真实 Chrome UA**：ankergames 与 iacg 在纯无头指纹下返回 403，
   加真实 UA 后 200。
 - 清理孤儿 Chrome（只杀项目 profile，不碰用户浏览器）：
@@ -443,18 +489,38 @@ python app.py
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
   ```
 
+### 打包（2026-10-21 实测）
+
+- **PyInstaller 6.22.3**，Python 3.14.6，onedir 模式（`game-finder.spec`）。
+- 产物：`dist/game-finder/` **142.8 MB**；`dist/game-finder-0.1.0-win64.zip` **60.9 MB / 834 文件**。
+- 体积构成：Playwright `driver/`（node.exe 89 MB + package/）约 102 MB，是主要部分。
+- 构建：`python tools/build_portable.py`（自动剔掉 `data/`、`logs/`、`chrome-profile-*`）。
+- **打包版实测**（解压到 `D:\K\deepseek\_ziptest`，全新路径）：
+  - `--check` 正确报告 frozen / bundle_root / app_root / chrome 版本
+  - 首次运行自动在 exe 旁生成 `config.yaml` / `sites.yaml` / `data/` / `logs/`
+  - `/api/sites` 19 站；`/` 返回 UI（13187 字节）
+  - **中文「夏色四叶草」→ ok=5/14**（inarigal 1 / galgamex 3 / anime-sharing 21 / acggw 2 / kungal 4）
+  - **英文「enderlilies」→ ok=4~5/16**（playzip 1 / gamebounty 4 / touchgal 3 / gamer520 3 / ankergames 1）
+  - 直连与走代理的**结果一致**（nyaa 直连超时属预期）
+
+
 ---
 
 ## 八、代码地图
 
 ```
-app.py                      启动 uvicorn + 开浏览器
-config.yaml                 profile 路径、代理、超时
+app.py                      启动 uvicorn + 开浏览器；--check 诊断；--no-browser
+config.yaml                 profile 路径、代理（auto_detect）、超时
 sites.yaml                  21 站注册表
+game-finder.spec            PyInstaller 打包定义（onedir）
+README.md                   面向拿到 zip 的用户的使用说明
+finder/paths.py             运行形态路径：bundle_root（只读）/ app_root（exe 旁可写）
+finder/proxy.py             代理探测：parse_server / probe_alive / resolve / apply
 finder/lang.py              detect_lang（zh/en/ja）
 finder/models.py            Site / SearchSpec / SearchHit / Download / GameDetail
 finder/sites.py             load_sites / filter_sites_by_lang
-finder/browser.py           BrowserSession（专用 profile + 真 UA + 显式代理）
+finder/browser.py           BrowserSession（专用 profile + 真 UA + 自动代理）
+                            find_chrome（配置路径 → 候选表）
 finder/search.py            build_search_url / parse_result_links / pick_best / strip_chrome
                             clamp_query_detail（半截词判定）
 finder/detail.py            extract_card / extract_downloads / decode_gb_dl_links
@@ -465,7 +531,8 @@ finder/health.py            classify / check_site（状态机就绪，无定时�
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
 finder/web/static/index.html  单页 UI
-tests/                      435 个离线测试 + fixtures
+tests/                      468 个离线测试 + fixtures
+tools/build_portable.py     构建便携版 + 打 zip
 ```
 
 ---
@@ -500,6 +567,10 @@ tests/                      435 个离线测试 + fixtures
    否则不要自动跟进**（跟进等于把别的游戏的链接挂给用户）。
 5. **健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，**不做**。
    `health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
+6. **发布到 GitHub** —— 便携版已构建并本地验证通过（2026-10-21），
+   用户明确要求「上传等确认」，所以仓库、Release 形式（zip 直传 vs Release asset）
+   与是否公开都**待用户拍板**。打包前需确认：仓库里**不能**有 `chrome-profile/`
+   与 `data/`（含用户登录态与搜索历史），`.gitignore` 已覆盖。
 
 ### 测量纪律（这轮踩到两次，都花过代价）
 
@@ -525,6 +596,18 @@ tests/                      435 个离线测试 + fixtures
   → 凡是涉及第三方站点 DOM/时序的改动，**必须有一次真机验证**才能标 ✅；
   且真机脚本要**写 JSON/TXT 再用 read 看**（GBK 控制台会把 CJK 打成乱码，
   直接看 stdout 会误判按钮文字）。
+- **「能构建」≠「能运行」**（2026-10-21，打包）：PyInstaller 退出码 0、产物目录
+  看着齐全，但打包版仍可能在启动时才暴露问题（`ROOT` 指向临时目录、
+  Playwright driver 缺文件、`uvicorn.run` 字符串形式失效）。
+  → 打包后的验收必须是：**在新路径解压 → `--check` → 起服务 → 真跑一次搜索**。
+  本轮就是这么发现 `config.yaml` 没被复制到 exe 旁边、`node.exe` 是否带全的。
+- **测试要锁住「真机量出来的值」**（2026-10-21）：`test_galgamex_selector_is_the_measured_one`
+  把真机测出的选择器写进断言，`test_popup_redirect_sites_have_both_selectors`
+  在配置层锁死「有 download_flow 就必须两个 selector 都在」——
+  否则缺 selector 只会静默返回空列表，看起来像「站点没资源」。
+- **测「代理回退」必须固定探活结果**：`fake_pw` fixture 里把 `probe_alive` 固定成 True，
+  否则整批浏览器用例的结果会随「本机代理开没开」飘（本轮真的踩到过一次）。
+
 
 ### 已完成的基础设施
 

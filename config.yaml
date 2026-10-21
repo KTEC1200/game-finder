@@ -1,6 +1,11 @@
 proxy:
+  # true = 允许使用代理；false = 永不使用（纯直连）
   enabled: true
   server: "http://127.0.0.1:6234"
+  # true = 启动时探一下上面的端口，连不上就自动改直连（推荐）
+  # false = 无条件走代理（旧行为；代理没开时所有站点都会 ERR_PROXY_CONNECTION_FAILED）
+  # 实测：19 个目标站里 18 个直连可用，只有 nyaa(sukebei.nyaa.si) 直连超时。
+  auto_detect: true
 
 browser:
   chrome_path: 'C:\Program Files\Google\Chrome\Application\chrome.exe'

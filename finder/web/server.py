@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 
@@ -10,12 +11,18 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import paths
 from ..lang import detect_lang
 from ..models import GameDetail, Site
 from ..sites import filter_sites_by_lang, load_sites
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-CONFIG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+log = logging.getLogger("gamefinder.server")
+
+# 开发形态下 ROOT 就是项目根（与改动前等价）；打包后是 exe 旁边，
+# 这样 config.yaml / sites.yaml / data/ / chrome-profile/ 都能被用户改。
+paths.ensure_runtime_files()
+ROOT = paths.app_root()
+CONFIG = yaml.safe_load(paths.config_path(ROOT).read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +124,7 @@ def _sse(event: str, data: dict) -> str:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Game Finder")
-    all_sites = load_sites(ROOT / "sites.yaml")
+    all_sites = load_sites(paths.sites_path(ROOT))
 
     @app.get("/api/sites")
     def sites():
@@ -169,7 +176,8 @@ def create_app() -> FastAPI:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    static = Path(__file__).resolve().parent / "static"
+    # 前端资源跟着 Python 包走（打包后在只读资源里），不在 exe 旁边。
+    static = paths.static_dir()
     if static.exists():
         app.mount("/", StaticFiles(directory=str(static), html=True), name="static")
     return app
