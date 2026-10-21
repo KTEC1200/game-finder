@@ -15,7 +15,7 @@
 
 ### 便携版（推荐）
 
-1. 下载 `game-finder-<版本>-win64.zip`，解压到任意目录（**不要在压缩包里直接双击**）。
+1. 到 [Releases](../../releases) 下载 `game-finder-<版本>-win64.zip`，解压到任意目录（**不要在压缩包里直接双击**）。
 2. 确保本机装了 [Google Chrome](https://www.google.com/chrome/)。
 3. 双击 `game-finder.exe`。浏览器会自动打开 `http://127.0.0.1:8734/`。
 
@@ -123,3 +123,13 @@ python -m pytest -q          # 517 个离线测试，约 6 秒
 ```
 
 设计细节、踩过的坑、站点适配状态都在 [`PROGRESS.md`](PROGRESS.md)。
+
+## 免责声明
+
+本项目只做**链接聚合**：它不托管、不分发任何游戏文件，也不绕过任何站点的登录、
+验证码或付费墙。遇到 `NEEDS_LOGIN` / `NEEDS_GATE` / `NEEDS_COMMENT` 会如实告诉你
+缺什么，不会替你去突破。请遵守所在地区法律与各资源站的使用条款。
+
+## 许可证
+
+[MIT](LICENSE)
