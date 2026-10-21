@@ -32,9 +32,10 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **468 个离线测试全绿**（2026-10-21 复跑；新增 33 例锁定免代理回退 + 打包路径） |
+| 代码 / 测试 | ✅ **511 个离线测试全绿**（2026-10-21 复跑；新增 33 例锁定免代理回退 + 打包路径，43 例锁定引擎兜底） |
 | 免代理 | ✅ **自动探测 + 回退直连**：`proxy.auto_detect` 探 6234，不通就直连（实测 18/19 站直连可用） |
 | 便携版 | ✅ **PyInstaller onedir + zip**，142.8 MB / 60.9 MB 压缩包，解压双击即用，已在新路径实测 |
+| 引擎兜底 | ✅ 有下载链接的站点 < 3 时，结果区上方给必应/百度/谷歌/Yandex **跳转链接**（只拼 URL，不发请求） |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 + 换名提示 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
@@ -410,6 +411,34 @@ python app.py
     打包后没有可导入的模块路径，必须传 app 对象：
     `from finder.web.server import app as fastapi_app` + `uvicorn.run(fastapi_app, ...)`。
 
+### 2026-10-21 第四轮（搜索引擎兜底）
+
+用户要求（原文，m01166）：「增加功能，如果出来的结果少于三个，在必应、百度、谷歌、
+Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就行」。
+三个口径经确认（m01187）：**有下载链接的站点数 < 3** 触发、**查询词原样**传引擎、
+**结果区上方单独一块**。
+
+39. **「少于三个」的计数口径不能沿用 `done.ok`**
+    `ok` 数的是「error 为空」的站，其中包含 `no_links`（站点找到游戏但抽不到链接）
+    和只有 `NO_RESULTS` 之外错误的站。按 `ok` 触发会出现「已经有 3 张卡却仍推引擎链接」，
+    而那些卡对用户来说一个链接都点不了。
+    修法：`finder/engines.py::linked_site_count` 只数**downloads 里至少有一条非空 URL
+    的站点**，`needs_fallback` = 该数 < `MIN_LINKED_SITES`（3）。
+    `kind` 判不准（`unknown`）也算 —— URL 有了用户就能点。计数单位是**站点**，
+    同一站给 3 条网盘仍只算 1（`GameDetail` 本来就是一站一条）。
+
+40. **引擎兜底绝不能真去抓引擎结果页**
+    用户明说「不用给出结果，给跳转链接就行」。`engine_links()` 是**纯函数**：
+    只做 `quote(query, safe="")` + 字符串拼接，不发任何网络请求。
+    好处是零延迟、零反爬风险，也不会把引擎页的无关结果混成「找到的游戏」。
+    空格用 `%20` 而不是 `+`（`+` 在部分引擎里是字面加号，会搜出别的东西）。
+
+41. **兜底块必须清空，否则会串上一次查询的链接**
+    单页 UI 里 `#engines` 是常驻容器，`search()` 开头必须
+    `engines.innerHTML = ''` + `display:none`，收到 `engines` 帧才 `display:block`。
+    静态测试 `tests/test_ui_engines.py` 锁住这条（以及「容器必须在 `<main>` 之前」、
+    「链接必须过 `safeUrl()`」）。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -516,6 +545,7 @@ game-finder.spec            PyInstaller 打包定义（onedir）
 README.md                   面向拿到 zip 的用户的使用说明
 finder/paths.py             运行形态路径：bundle_root（只读）/ app_root（exe 旁可写）
 finder/proxy.py             代理探测：parse_server / probe_alive / resolve / apply
+finder/engines.py           引擎兜底：engine_links（纯 URL 拼接）/ linked_site_count / needs_fallback
 finder/lang.py              detect_lang（zh/en/ja）
 finder/models.py            Site / SearchSpec / SearchHit / Download / GameDetail
 finder/sites.py             load_sites / filter_sites_by_lang
@@ -529,10 +559,11 @@ finder/pipeline.py          search_one（url/form/index 三模式）/ _follow_de
                             run（缓存 + 并发）/ normalize_query / resolve_worker_primary
 finder/health.py            classify / check_site（状态机就绪，无定时器）
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
-finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新
-finder/web/static/index.html  单页 UI
-tests/                      468 个离线测试 + fixtures
+finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新；有链接站点 < 3 时发 engines 帧
+finder/web/static/index.html  单页 UI（含结果区上方的引擎兜底块）
+tests/                      511 个离线测试 + fixtures
 tools/build_portable.py     构建便携版 + 打 zip
+tools/probe_engines_ui.py   真机验证引擎兜底块（真 Chrome + 真服务，结果写 JSON）
 ```
 
 ---
@@ -607,6 +638,11 @@ tools/build_portable.py     构建便携版 + 打 zip
   否则缺 selector 只会静默返回空列表，看起来像「站点没资源」。
 - **测「代理回退」必须固定探活结果**：`fake_pw` fixture 里把 `probe_alive` 固定成 True，
   否则整批浏览器用例的结果会随「本机代理开没开」飘（本轮真的踩到过一次）。
+- **前端功能也要真机验一次**（2026-10-21，引擎兜底）：离线测试只能锁「容器在 `<main>` 之前、
+  默认隐藏、搜索时清空、链接过 `safeUrl()`」这些**结构**，锁不住「真浏览器里它到底显示没有」。
+  `tools/probe_engines_ui.py` 起真服务 + 真 Chrome，读 `getComputedStyle(...).display`、
+  每个按钮的 `href`、以及 `compareDocumentPosition` 判 DOM 顺序 —— 实测「终焉之莉莉」
+  2/14 出链 → 兜底块 `display:block`、4 个链接 CJK 编码正确、`engines_before_results: true`。
 
 
 ### 已完成的基础设施

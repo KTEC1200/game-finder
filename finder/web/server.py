@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import paths
+from ..engines import MIN_LINKED_SITES, engine_links, needs_fallback
 from ..lang import detect_lang
 from ..models import GameDetail, Site
 from ..sites import filter_sites_by_lang, load_sites
@@ -165,7 +166,19 @@ def create_app() -> FastAPI:
             # _run_pipeline 先把整个 list 拿回来，之后才逐条发帧，
             # 所以排序放后端是零成本的（不需要在 JS 里重排 DOM）。
             tier_by_site = {s.id: s.tier for s in part}
-            for d in order_results(results, tier_by_site):
+            ordered = order_results(results, tier_by_site)
+            # 资源站没找够（有链接的站点 < 3）时补一块「去搜索引擎再找」。
+            # 这一帧只带跳转链接，不带任何引擎结果；放在 result 之前，
+            # 前端于是先建好结果区上方那个容器。顺序与阈值见 finder/engines.py。
+            fallback, linked = needs_fallback(results)
+            if fallback:
+                yield _sse("engines", {
+                    "query": query,
+                    "linked_sites": linked,
+                    "threshold": MIN_LINKED_SITES,
+                    "links": engine_links(query),
+                })
+            for d in ordered:
                 if not d.error:
                     ok += 1
                 payload = asdict(d)

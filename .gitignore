@@ -20,6 +20,7 @@ dist/
 tools/_gf_*/
 tools/_probe_*/
 tools/probe_*.json
+tools/probe_*.png
 tools/_*.txt
 tools/_*.html
 tools/_*.js

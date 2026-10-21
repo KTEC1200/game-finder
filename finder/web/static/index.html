@@ -68,6 +68,18 @@
             display:flex; gap:8px; align-items:center; flex-wrap:wrap;
             color:var(--dim); font-size:12px; }
   .legend b { color:#c9d3e0; }
+
+  /* 搜索引擎兜底块：资源站有链接的站点 < 3 时出现，默认隐藏。
+     只放跳转链接，不放任何引擎结果（用户要求「不用给出结果」）。 */
+  .engines { margin:24px 24px 0; padding:14px 16px; border-radius:12px;
+             background:#141a22; border:1px solid #22303f;
+             display:none; }
+  .engines .engines-title { color:#c9d3e0; font-weight:600; font-size:14px; }
+  .engines .engines-sub { color:var(--dim); font-size:12.5px; margin-top:6px; }
+  .engines .engines-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .engines a.engine { padding:7px 14px; border-radius:8px; text-decoration:none;
+                      font-size:13px; background:#1b2836; color:#8fd0ff; }
+  .engines a.engine:hover { background:#22384d; color:#cfe8ff; }
 </style>
 </head>
 <body>
@@ -96,6 +108,8 @@
   <span class="badge not_found">未找到</span><span>站点没搜到</span>
   <span class="badge backup">备用站</span><span>覆盖较弱，排在同档最后</span>
 </div>
+<!-- 搜索引擎兜底块：资源站没找够时由 engines 帧填充，默认隐藏 -->
+<div class="engines" id="engines"></div>
 <main id="out"></main>
 
 <script>
@@ -105,6 +119,7 @@ const refreshBtn = document.getElementById('refresh');
 const input = document.getElementById('q');
 const langLine = document.getElementById('langLine');
 const hint = document.getElementById('hint');
+const engines = document.getElementById('engines');
 
 const KIND_CLASS = { pan:'pan', magnet:'magnet', direct:'direct', unknown:'' };
 const LANG_NAME = { zh:'中文', en:'英文', ja:'日文' };
@@ -155,6 +170,9 @@ const HINT_BY_LANG = {
 };
 const HINT_FALLBACK =
   '这次没有站点给出下载链接。换 <b>另一种语言的游戏名</b>再搜一次。';
+
+// 搜索引擎兜底块的标题（常量文案，绝不拼站点数据）。
+const ENGINES_TITLE = '资源站没找够，去搜索引擎再找';
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -218,12 +236,40 @@ function renderCard(d) {
   return c;
 }
 
+// 搜索引擎兜底块：资源站有链接的站点 < threshold 时后端发 engines 帧，
+// 这里只渲染**跳转链接**（用户要求「不用给出结果」）。
+// 链接 URL 由后端用用户查询词拼好，仍要过 safeUrl() —— 它是从用户输入来的。
+function renderEngines(d) {
+  engines.innerHTML = '';
+  const title = el('div', 'engines-title', ENGINES_TITLE);
+  engines.appendChild(title);
+  const n = Number.isFinite(d.linked_sites) ? d.linked_sites : 0;
+  const need = Number.isFinite(d.threshold) ? d.threshold : 3;
+  engines.appendChild(el('div', 'engines-sub',
+    `只有 ${n} 个资源站给出链接（少于 ${need} 个）。换下面几个搜索引擎再找找：`));
+  const row = el('div', 'engines-row');
+  (d.links || []).forEach(x => {
+    const href = safeUrl(x.url);
+    if (!href) return;
+    const a = el('a', 'engine', x.name);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = href;
+    row.appendChild(a);
+  });
+  if (row.children.length) engines.appendChild(row);
+  engines.style.display = 'block';
+}
+
 async function search(refresh) {
   const query = input.value.trim();
   if (!query) return;
   goBtn.disabled = true;
   refreshBtn.disabled = true;
   out.innerHTML = '';
+  engines.innerHTML = '';
+  engines.style.display = 'none';
   hint.style.display = 'none';
   langLine.textContent = refresh ? '搜索中…（已跳过缓存）' : '搜索中…';
   // 站点名 / 首页兜底链接就绪后再渲染卡片（失败也已内部吞掉，不会卡住）
@@ -260,6 +306,8 @@ async function search(refresh) {
         gotAny = true;
         if (data.extra && data.extra.cached) cachedCount++;
         out.appendChild(renderCard(data));
+      } else if (ev === 'engines') {
+        renderEngines(data);
       } else if (ev === 'error') {
         out.appendChild(renderCard({site_id:'system', title:'出错', error:data.message,
                                     downloads:[]}));
