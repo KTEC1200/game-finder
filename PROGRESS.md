@@ -595,6 +595,12 @@ tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal
 
 ### 仍待处理
 
+0. **本机直连 `github.com` 不通，但 `api.github.com` / `uploads.github.com` 通** ——
+   `github.com` 解析到 `20.205.243.166`（被墙），`git push` 与 Release 下载都会
+   `Failed to connect to github.com:443`。**推拉都要显式走代理**：
+   `git -c http.proxy=http://127.0.0.1:6234 -c https.proxy=http://127.0.0.1:6234 push`
+   （或 `git config --local http.proxy`）。API 上传不需要代理。
+   `140.82.113.4` / `140.82.114.4` / `140.82.121.3` 直连均 200，需要时可 `--resolve`。
 1. **`NO_RESULTS: pick_best returned None`**。要先做对照实验区分两种成因：
    - 候选全是 0.5 分（详情形状判据不认该站 URL）→ 改 `DETAILISH_RE` 或给站点配 `detail_pattern`
    - 候选有 1.0 分但标题里没有查询词（该站用别的语言/罗马音命名）→ 站点事实
@@ -609,10 +615,17 @@ tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal
    否则不要自动跟进**（跟进等于把别的游戏的链接挂给用户）。
 5. **健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，**不做**。
    `health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
-6. **发布到 GitHub** —— 便携版已构建并本地验证通过（2026-10-21），
-   用户明确要求「上传等确认」，所以仓库、Release 形式（zip 直传 vs Release asset）
-   与是否公开都**待用户拍板**。打包前需确认：仓库里**不能**有 `chrome-profile/`
-   与 `data/`（含用户登录态与搜索历史），`.gitignore` 已覆盖。
+6. ~~发布到 GitHub~~ ✅ **已完成（2026-10-21）**
+   仓库 <https://github.com/KTEC1200/game-finder>（**公开**，MIT），
+   Release **v0.1.0** 附件 `game-finder-0.1.0-win64.zip`（60.9 MB / 834 文件）。
+   用户拍板：公开仓库 + zip 放 Release 附件 + MIT + 仓库名 `game-finder`。
+   发布前审过：无 token/密码/密钥；只有本机代理端口 `127.0.0.1:6234` 与
+   若干 `C:\Users\27025\Desktop\...` 绝对路径（自己的机器路径，不影响功能）。
+   `chrome-profile/`、`data/`、`logs/` 均未被跟踪（`.gitignore` 覆盖）。
+   **发布验证**：从 Release 真下载 → SHA256 与本地一致
+   （`5c0de990554ff738fd3287840845b01320d9724b15d0996d73cac6c860b1cb8e`，63872343 字节）
+   → 解压到全新路径 → `--check` 正确 → 真跑「终焉之莉莉」2/14 →
+   `#engines display:block` + 四条链接正确。**发出去的包确实能用。**
 
 ### 测量纪律（这轮踩到两次，都花过代价）
 
