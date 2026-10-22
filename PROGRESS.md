@@ -709,6 +709,11 @@ tools/probe_packaged_login_roundtrip.py  打包版完整 /api/login 往返（超
 5. **健康巡检定时器** —— 用户 m02579 已明确说「定期检查可用性，不需要了」，**不做**。
    `health.py` 的状态机保留，供将来手动巡检或 UI 面板复用。
 6. ~~发布到 GitHub~~ ✅ **已完成（2026-10-21）**
+   **v0.1.1（2026-10-22）**：Release <https://github.com/KTEC1200/game-finder/releases/tag/v0.1.1>
+   附件 `game-finder-0.1.1-win64.zip`（63885659 字节，
+   SHA256 `ed46cfce2d9bf5228fda660d30e46c46c175a946d2891349ef50bbb2301c5a9e`）。
+   发布后**真下载回验**：字节数与本地完全一致（`identical: True`），
+   解压到全新路径 `--check` 通过、`/api/login` 完整往返通过。
    仓库 <https://github.com/KTEC1200/game-finder>（**公开**，MIT），
    Release **v0.1.0** 附件 `game-finder-0.1.0-win64.zip`（60.9 MB / 834 文件）。
    用户拍板：公开仓库 + zip 放 Release 附件 + MIT + 仓库名 `game-finder`。
