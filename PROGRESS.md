@@ -641,6 +641,7 @@ tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal
 tools/probe_login_flow.py   真机验证登录窗口（有头 + 落在登录页 + 超时人话）
 tools/probe_login_ui.py     真机验证登录框只在 needs_login 且无链接的卡片上出现
 tools/probe_login_outcome.py 真机确认 galgame.dev 未登录搜索 → outcome=not_found
+tools/probe_packaged_login.py  同上但跑解压后的 exe（验 _internal 里的静态资源与 JS）
 ```
 
 ---
@@ -667,6 +668,9 @@ tools/probe_login_outcome.py 真机确认 galgame.dev 未登录搜索 → outcom
   `https://galgame.dev/login`、title `登录帐号 | 真紅論壇`；
   未登录搜索 `NEEDS_LOGIN` → `outcome=not_found` → 登录框出现（真 Chrome 跑真 JS 确认）；
   `direct`/`pan` 卡片与 nyaa/touchgal 均不长按钮。
+  **打包版也已验证**（`tools/probe_packaged_login.py`，跑解压后的 exe）：
+  19 站带 `needs_login`/`login_url`、`/api/login` 拒绝不需要登录的站、
+  真浏览器里 `renderLogin` 在 `_internal` 的静态资源上同样长按钮。
 
 ### 仍待处理
 
