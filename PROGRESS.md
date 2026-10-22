@@ -650,6 +650,7 @@ tools/probe_login_flow.py   真机验证登录窗口（有头 + 落在登录页 
 tools/probe_login_ui.py     真机验证登录框只在 needs_login 且无链接的卡片上出现
 tools/probe_login_outcome.py 真机确认 galgame.dev 未登录搜索 → outcome=not_found
 tools/probe_packaged_login.py  同上但跑解压后的 exe（验 _internal 里的静态资源与 JS）
+tools/probe_packaged_login_roundtrip.py  打包版完整 /api/login 往返（超时路径 + 锁释放）
 ```
 
 ---
@@ -679,6 +680,11 @@ tools/probe_packaged_login.py  同上但跑解压后的 exe（验 _internal 里�
   **打包版也已验证**（`tools/probe_packaged_login.py`，跑解压后的 exe）：
   19 站带 `needs_login`/`login_url`、`/api/login` 拒绝不需要登录的站、
   真浏览器里 `renderLogin` 在 `_internal` 的静态资源上同样长按钮。
+  **完整 HTTP 往返也在打包版验过**（`tools/probe_packaged_login_roundtrip.py`，
+  把 `login.timeout_s` 压到 15 秒）：`POST /api/login` → 真起有头 Chrome →
+  落地 `https://galgame.dev/login` → 15.3s 超时 → `ok=false` +
+  「等了 15 秒仍未检测到登录，可以再点一次」；**连打两次都是 15.3s**，
+  证明锁已释放、第二次不会被「已经有一个登录窗口开着」卡住。
 
 ### 仍待处理
 
