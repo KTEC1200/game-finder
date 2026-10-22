@@ -64,6 +64,19 @@
   .cardlink:hover { color:var(--accent); text-decoration:underline; }
   .target { color:var(--dim); font-size:11px; word-break:break-all; }
 
+  /* 「打开浏览器手动登录」：只在 needs_login 的站点卡片上出现。
+     程序用的是专用 profile，用户在**自己** Chrome 里登录过也用不到，
+     所以必须有这个入口把登录态灌进程序自己的 profile。 */
+  .loginbox { margin-top:2px; padding:10px 12px; border-radius:8px;
+              background:#1c2431; border:1px solid #2b3a4d; }
+  .loginbox .loginmsg { color:#c9d3e0; font-size:12.5px; line-height:1.5; }
+  .loginbox .loginmsg b { color:var(--warn); }
+  .loginbox .loginrow { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  .loginbox button.login { padding:7px 14px; font-size:13px; background:#2d4a6b;
+                           color:#cfe8ff; font-weight:600; }
+  .loginbox button.login:disabled { opacity:.55; }
+  .loginbox .loginres { font-size:12px; color:var(--dim); }
+
   .legend { padding:10px 24px; border-bottom:1px solid #23262e;
             display:flex; gap:8px; align-items:center; flex-wrap:wrap;
             color:var(--dim); font-size:12px; }
@@ -135,7 +148,8 @@ const sitesReady = (async () => {
   try {
     const r = await fetch('/api/sites');
     (await r.json()).forEach(s => {
-      SITES[s.id] = { name:s.name, homepage:s.homepage, tier:s.tier };
+      SITES[s.id] = { name:s.name, homepage:s.homepage, tier:s.tier,
+                      needs_login:s.needs_login, login_url:s.login_url };
     });
   } catch (e) { /* 站点表拿不到就退回 site_id 显示，不阻塞搜索 */ }
 })();
@@ -179,6 +193,58 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+
+// 登录块：只在「需要登录 + 这次没搜到」的卡片上出现。
+// 文案全部是常量，绝不拼站点返回的字符串（除站点名，它来自 sites.yaml）。
+const LOGIN_HINT = '该站搜索需要先登录。点下面的按钮会开一个浏览器窗口，' +
+  '在里面登录一次即可 —— 登录态会存进程序自己的 profile，之后不用再登。';
+const LOGIN_BTN = '打开浏览器登录';
+const LOGIN_WAIT = '等你在浏览器里登录…（登完这里会自动重搜）';
+const LOGIN_DONE = '登录成功，正在重新搜索…';
+const LOGIN_FAIL = '没检测到登录：';
+
+function renderLogin(d, card) {
+  const site = SITES[d.site_id] || {};
+  if (!site.needs_login) return;
+  // 只认后端给的 d.outcome，不在 JS 里解析错误字串（见 test_result_order）。
+  //   not_found == 这站对本次查询啥也没给（无结果 / 选错游戏 / 搜索页登录墙…）
+  //   no_links  == 找到了游戏但抽不出链接（详情页可能是「登录后可见」）
+  // 已经拿到链接的卡片（direct / pan）不该再劝人去登录。
+  if (d.outcome !== 'not_found' && d.outcome !== 'no_links') return;
+
+  const box = el('div', 'loginbox');
+  box.appendChild(el('div', 'loginmsg', LOGIN_HINT));
+  const row = el('div', 'loginrow');
+  const btn = el('button', 'login', LOGIN_BTN);
+  const res = el('span', 'loginres', '');
+  row.appendChild(btn);
+  row.appendChild(res);
+  box.appendChild(row);
+  card.appendChild(box);
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    res.textContent = LOGIN_WAIT;
+    try {
+      const r = await fetch('/api/login', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({site_id: d.site_id}),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        res.textContent = LOGIN_DONE;
+        // 登录态刚写进 profile，旧缓存里的 NEEDS_LOGIN 已经过时 —— 强制刷新
+        search(true);
+        return;
+      }
+      res.textContent = LOGIN_FAIL + (data.message || '未知原因');
+    } catch (e) {
+      res.textContent = LOGIN_FAIL + e;
+    }
+    btn.disabled = false;
+  });
 }
 
 function renderCard(d) {
@@ -233,6 +299,7 @@ function renderCard(d) {
     dl.appendChild(a);
   });
   if (dl.children.length) c.appendChild(dl);
+  renderLogin(d, c);
   return c;
 }
 

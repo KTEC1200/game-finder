@@ -32,10 +32,11 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **517 个离线测试全绿**（2026-10-21 复跑；新增 33 例免代理回退 + 打包路径，43 例引擎兜底，6 例启动器 CLI） |
+| 代码 / 测试 | ✅ **571 个离线测试全绿**（2026-10-22 复跑；新增 33 例免代理回退 + 打包路径，43 例引擎兜底，6 例启动器 CLI，54 例手动登录） |
 | 免代理 | ✅ **自动探测 + 回退直连**：`proxy.auto_detect` 探 6234，不通就直连（实测 18/19 站直连可用） |
 | 便携版 | ✅ **PyInstaller onedir + zip**，142.8 MB / 60.9 MB 压缩包，解压双击即用，已在新路径实测 |
 | 引擎兜底 | ✅ 有下载链接的站点 < 3 时，结果区上方给必应/百度/谷歌/Yandex **跳转链接**（只拼 URL，不发请求） |
+| 手动登录 | ✅ 需要登录的站（galgame.dev）卡片上给「打开浏览器登录」，开**有头**窗口落到登录页，登完自动重搜 |
 | 语种路由 | ✅ 中文→16 站，英文→17 站，日文→11 站（共 21 站，zi0 已移出） |
 | UI | ✅ SSE 流式卡片 + 强制刷新按钮 + 换名提示 |
 | 并发 | ✅ `workers=3`，真站实测 **93.1s → 44.1s（2.1x）** |
@@ -449,6 +450,59 @@ Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就�
     `--check` 不起服务 / `--no-browser` 不开浏览器」。
     **教训**：验收脚本自己也是代码，报错先怀疑脚本与产物的接口对不上。
 
+### 2026-10-22 第五轮（手动登录 galgame.dev）
+
+用户问（m01518）：「真红讨论组这个站点如果我提前在浏览器登录过也不行吗」。
+实测答案：**不行**。程序用**专用** profile（`chrome-profile`），用户在**自己** Chrome
+里登录的 Cookie 在默认 user-data-dir 里；而 Chrome 136+ 禁止对默认目录开 DevTools
+（`is_chrome_default_profile` 守卫会直接抛错）。所以必须让用户**在程序自己的 profile 里**
+登一次。方案经确认（m01660）：卡片上给按钮 → 开有头窗口 → 登完自动重搜。
+
+43. **`needs_login` 曾经是个纯装饰字段**
+    它只出现在 `models.Site`、`sites.py` 解析、`/api/sites` 输出里，
+    **不驱动任何行为** —— 配置写了 `needs_login: true`，程序照旧去搜，
+    撞上 302 登录页后只报一句 `NEEDS_LOGIN`，用户无从下手。
+    修法：`needs_login` 现在真的长出登录入口（`login_url_for` → `/api/sites`
+    → 前端 `renderLogin`），并且只有它才给入口（不需要登录的站绝不显示按钮）。
+
+44. **登录窗口必须有头，且必须落到登录页**
+    `LoginSession._open()` 用 `headful_override=True` 起浏览器（`headless` 下用户
+    根本没法输密码），起来直接 `goto(login_url)`，不让用户自己找入口。
+    `tests/test_login.py::test_session_opens_headful_on_the_login_page` 锁这两条。
+
+45. **登录成功不能只看 URL**
+    `galgame.dev` 首页**未登录也能打开**，只看 URL 会立刻误报成功。
+    判据必须是「不在登录路径上」**且**「正文出现登录态标记」
+    （`LOGGED_IN_MARKERS`：退出/登出/我的帐号/个人中心/Sign out/Log out/My account），
+    站点可用 `login_success_pattern` 覆盖；配置里的正则写错要**退回通用判据**
+    而不是把功能卡死（`test_broken_success_pattern_falls_back_to_markers`）。
+
+46. **用户中途关窗口是正常路径，不是失败**
+    关掉窗口时 Playwright 抛 `Target page, context or browser has been closed`。
+    必须识别成 `cancelled=True`（`message="登录窗口已关闭"`），既不抛异常、
+    也不刷 `log.exception`。超时同理返回 `ok=False` + 人话（「可以再点一次」）。
+
+47. **登录写主 profile，搜索跑 worker profile —— 这条链路必须锁住**
+    并发路径下每个 worker 用 `chrome-profile-w<N>`，由
+    `seed_worker_profile(primary, worker)` 从**主** profile 播种。
+    登录若写到别的目录，用户登完还是搜不到，**而且没有任何报错**。
+    `tests/test_login.py` 末尾三条用例钉死：`resolve_worker_primary` ==
+    `resolve_profile_dir(主 profile)`、`LoginSession` 不传 `profile_override`、
+    `SEED_ENTRIES` 含 `Default/Network/Cookies` 与 `Local State`。
+
+48. **登录态写进 profile 后，缓存里的 `NEEDS_LOGIN` 已经过时**
+    失败结果缓存 30 分钟。登完必须 `search(true)` 强制刷新，否则用户看到
+    的还是「需要登录」，会以为登录没生效（`test_login_success_forces_a_refresh`）。
+
+49. **UI 判据只认 `d.outcome`，不许在 JS 里解析 error 字串**
+    第一版写成 `String(d.error||'').split(':')[0]` 判前缀，直接被
+    `tests/test_result_order.py::test_html_does_not_parse_error_prefixes` 拦下 ——
+    那条规则是第三轮为了「四档排序只认后端」立的。
+    改用 `d.outcome !== 'not_found' && d.outcome !== 'no_links'`。
+    真机复核：galgame.dev 搜「千恋万花」→ `NEEDS_LOGIN` →
+    `outcome_of` 因 `extra["search_login_wall"]` 存在而归 `not_found`，
+    登录框正常出现；`direct`/`pan` 卡片不长按钮；nyaa/touchgal 也不长。
+
 ---
 
 ## 五、站点机制备忘（后续改适配器前必看）
@@ -463,6 +517,13 @@ Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就�
   ⚠️ 供应商按钮的 class 与「分卷」按钮**完全一样**，只能靠
   `button[data-slot='button'][data-variant='default'][data-size='sm']` 定位
   （见缺陷 32）；点完要**轮询**等跳转，固定 sleep 会漏（缺陷 33）。
+- **galgame.dev（真紅論壇）**：`search?term={q}&in=titles`，**未登录 302 到 `/login`**，
+  `/api/search` 回 401 `not-authorised`。但**帖子详情页完全公开**
+  （`/topic/<slug>`，slug 自带 tid 前缀，不能再拼 tid），正文里就有网盘链。
+  分类 API 未登录可枚举：`/api/category/21/网赚盘资源?page=N`（20 条/页、4504 页）。
+  现在的做法是**让用户登录一次**（`login_url` + `/api/login` + 前端按钮），
+  登录态存进程序自己的 profile 并由 worker 播种。**注意**：用户在**自己** Chrome
+  里登录过不算数（专用 profile + Chrome 136 默认目录禁令）。
 - **jidiyouxi**：URL 模板 `search/detail/{q}`；详情页网盘链在整页 HTML 的 `#appState`
   SSR 数据里，`<a>` 标签 0 条外链；`og:image` 是坏字符串 `"[object Object]"`（站点自己的 bug）；
   不同游戏默认 tab 不同（本体/修改器/讨论求助）。
@@ -556,6 +617,7 @@ README.md                   面向拿到 zip 的用户的使用说明
 finder/paths.py             运行形态路径：bundle_root（只读）/ app_root（exe 旁可写）
 finder/proxy.py             代理探测：parse_server / probe_alive / resolve / apply
 finder/engines.py           引擎兜底：engine_links（纯 URL 拼接）/ linked_site_count / needs_fallback
+finder/login.py             手动登录：LoginSession（有头窗口）/ looks_logged_in / login_state（只读 Cookie）
 finder/lang.py              detect_lang（zh/en/ja）
 finder/models.py            Site / SearchSpec / SearchHit / Download / GameDetail
 finder/sites.py             load_sites / filter_sites_by_lang
@@ -570,11 +632,15 @@ finder/pipeline.py          search_one（url/form/index 三模式）/ _follow_de
 finder/health.py            classify / check_site（状态机就绪，无定时器）
 finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康历史，线程安全
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新；有链接站点 < 3 时发 engines 帧
-finder/web/static/index.html  单页 UI（含结果区上方的引擎兜底块）
-tests/                      517 个离线测试 + fixtures
+                            /api/login（开窗口等用户登录）+ /api/login/state（只读探测）
+finder/web/static/index.html  单页 UI（引擎兜底块 + 需要登录的站卡片上的登录按钮）
+tests/                      571 个离线测试 + fixtures
 tools/build_portable.py     构建便携版 + 打 zip
 tools/probe_engines_ui.py   真机验证引擎兜底块（真 Chrome + 真服务，结果写 JSON）
 tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal 里的静态资源）
+tools/probe_login_flow.py   真机验证登录窗口（有头 + 落在登录页 + 超时人话）
+tools/probe_login_ui.py     真机验证登录框只在 needs_login 且无链接的卡片上出现
+tools/probe_login_outcome.py 真机确认 galgame.dev 未登录搜索 → outcome=not_found
 ```
 
 ---
@@ -592,6 +658,15 @@ tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal
   （2 个分卷直链 + `https://pan.baidu.com/s/1aCmoplMimsXAb16i9tfP_A?pwd=us6i`），
   `galgamex_errors` 为空。期间发现并修掉三个真机才暴露的问题：
   选择器是猜的（缺陷 32）、固定 sleep 漏最后一条（缺陷 33）、`.z01` 分卷判 unknown（缺陷 34）。
+
+### 已修完的站（2026-10-22 增补）
+
+- **galgame.dev（真紅論壇）** ✅ 登录墙已解决 —— 不是绕过，而是给用户一个**登录入口**：
+  卡片上「打开浏览器登录」→ 有头窗口落到 `/login` → 登完自动重搜。
+  真机验证（2026-10-22）：`LoginSession` 12s 超时正确返回人话；落地页
+  `https://galgame.dev/login`、title `登录帐号 | 真紅論壇`；
+  未登录搜索 `NEEDS_LOGIN` → `outcome=not_found` → 登录框出现（真 Chrome 跑真 JS 确认）；
+  `direct`/`pan` 卡片与 nyaa/touchgal 均不长按钮。
 
 ### 仍待处理
 

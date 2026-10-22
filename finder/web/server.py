@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import paths
 from ..engines import MIN_LINKED_SITES, engine_links, needs_fallback
 from ..lang import detect_lang
+from ..login import LoginSession, login_state, login_url_for
 from ..models import GameDetail, Site
 from ..sites import filter_sites_by_lang, load_sites
 
@@ -136,9 +137,48 @@ def create_app() -> FastAPI:
              "kinds": s.kinds,
              # UI 用：卡片标题/跳转链接的兜底（NO_RESULTS 时 title/url 都是空的）
              # 与「备用站」标签。既有字段一个都没动。
-             "homepage": s.homepage, "tier": s.tier}
+             "homepage": s.homepage, "tier": s.tier,
+             # 需要登录的站才给登录入口，其余站不显示按钮
+             "login_url": login_url_for(s)}
             for s in all_sites
         ]
+
+    @app.post("/api/login")
+    def login(body: dict):
+        """开一个**有头**浏览器让用户手动登录，阻塞到登录成功 / 超时。
+
+        为什么阻塞：前端点了按钮就一直显示「等你登录…」，用户登完自动重搜。
+        profile 独占，同一时刻只允许一个（login.LoginSession 的 _LOCK）。
+        """
+        site_id = (body.get("site_id") or "").strip()
+        target = next((s for s in all_sites if s.id == site_id), None)
+        if target is None:
+            return {"ok": False, "site_id": site_id, "message": f"没有这个站点：{site_id}"}
+        if not target.needs_login:
+            return {"ok": False, "site_id": site_id,
+                    "message": f"{target.name} 不需要登录"}
+        try:
+            with LoginSession(CONFIG, ROOT, target) as sess:
+                result = sess.wait_for_login()
+        except RuntimeError as exc:  # 已有窗口开着
+            return {"ok": False, "site_id": site_id, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - 起浏览器失败等
+            log.exception("login failed for %s", site_id)
+            return {"ok": False, "site_id": site_id,
+                    "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        return {
+            "ok": result.ok, "site_id": result.site_id, "url": result.url,
+            "message": result.message, "elapsed_s": result.elapsed_s,
+            "cancelled": result.cancelled,
+        }
+
+    @app.get("/api/login/state")
+    def login_state_api(site_id: str = ""):
+        """只读探测 profile 里有没有该站 Cookie（不弹窗口、不搜索）。"""
+        target = next((s for s in all_sites if s.id == site_id), None)
+        if target is None:
+            return {"site_id": site_id, "logged_in": False, "reason": "没有这个站点"}
+        return login_state(CONFIG, ROOT, target)
 
     @app.post("/api/search")
     def search(body: dict):

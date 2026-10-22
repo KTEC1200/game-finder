@@ -53,6 +53,12 @@ class Site:
     search: SearchSpec
     tags: set[str] = field(default_factory=set)
     needs_login: bool = False
+    # needs_login 为 True 时，UI 提供「打开浏览器手动登录」按钮。
+    # 用户在有头浏览器里登录一次，登录态就留在专用 profile 里，
+    # 之后该站搜索才走得到 /search（否则会被 302 到 /login）。
+    login_url: str | None = None
+    # 判断「登录成功」的落地路径特征（正则）。缺省用 needs_login 的通用判据。
+    login_success_pattern: str | None = None
     max_query_len: int | None = None
     adapter_status: AdapterStatus = "untested"
     # 仅当 headless+真实UA 仍被 Cloudflare 拦时置 True，该站改用 headful

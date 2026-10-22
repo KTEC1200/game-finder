@@ -236,7 +236,11 @@ sites:
     homepage: "https://galgame.dev/"
     kinds: [论坛网盘, 直链]
     langs: [zh, en, ja]
+    # 该站 /search?term=... 未登录会 302 到 /login（/api/search 回 401），
+    # 但**帖子详情页完全公开**。UI 上的「登录」按钮会开有头浏览器让用户登一次，
+    # 登录态落在专用 profile 里，之后搜索才走得到 /search。
     needs_login: true
+    login_url: "https://galgame.dev/login"
     search:
       mode: url
       url_template: "https://galgame.dev/search?term={q}&in=titles"
