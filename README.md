@@ -115,6 +115,7 @@ proxy:
 | `search.timeout_ms` | 45000 | 单站搜索超时 |
 | `search.workers` | 3 | 并发数，每个 worker 一份独立 Chrome profile |
 | `cache.ttl_hours` | 12 | 成功结果缓存时长（失败只缓存 30 分钟） |
+| `login.timeout_s` | 600 | 「打开浏览器登录」等多久算超时 |
 
 `sites.yaml` 是站点定义（19 个站），一般不用改。
 
@@ -135,7 +136,7 @@ python tools/build_portable.py
 ## 开发
 
 ```bash
-python -m pytest -q          # 571 个离线测试，约 6 秒
+python -m pytest -q          # 578 个离线测试，约 6 秒
 ```
 
 设计细节、踩过的坑、站点适配状态都在 [`PROGRESS.md`](PROGRESS.md)。

@@ -386,3 +386,78 @@ def test_seed_entries_include_the_cookie_db():
 
     assert "Default/Network/Cookies" in SEED_ENTRIES
     assert "Local State" in SEED_ENTRIES, "缺 Local State 会导致 Cookies 解不开"
+
+
+# --- 超时/轮询间隔要能在 config.yaml 里调 --------------------------------
+# 打包验收与真机探针必须用短超时（默认 600s 会把自动化卡死 10 分钟）。
+
+def test_timeout_and_poll_come_from_config():
+    sess = LoginSession(
+        {"login": {"timeout_s": 12, "poll_ms": 250}}, __import__("pathlib").Path("."),
+        _site(needs_login=True),
+    )
+    assert sess.timeout_s == 12
+    assert sess.poll_ms == 250
+
+
+def test_explicit_argument_beats_config():
+    sess = LoginSession(
+        {"login": {"timeout_s": 600}}, __import__("pathlib").Path("."),
+        _site(needs_login=True), timeout_s=3,
+    )
+    assert sess.timeout_s == 3
+
+
+def test_bad_config_values_fall_back_to_defaults():
+    """配置写成字符串/None 不能把登录卡死或抛异常。"""
+    for bad in ("abc", None, {}, [], 0):
+        sess = LoginSession(
+            {"login": {"timeout_s": bad, "poll_ms": bad}},
+            __import__("pathlib").Path("."), _site(needs_login=True),
+        )
+        assert sess.timeout_s > 0
+        assert sess.poll_ms > 0
+
+
+# --- 关窗前必须确认 Cookie 真的落盘 ---------------------------------------
+# 页面显示「退出」不等于磁盘上有 Cookie。用户登完立刻关窗口时，
+# Chrome 可能还没刷盘 —— 这时重搜仍是登录墙，用户会以为功能坏了。
+
+class _FakeCtx:
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+    def cookies(self):
+        return self._cookies
+
+
+def test_cookie_snapshot_reports_site_cookies():
+    sess, page, _ = _session([("https://galgame.dev/", "", "退出")])
+    sess._sess = type("S", (), {"context": _FakeCtx([
+        {"domain": ".galgame.dev", "name": "express.sid"},
+        {"domain": "galgame.dev", "name": "csrf"},
+        {"domain": ".baidu.com", "name": "BDUSS"},
+    ])})()
+    snap = sess.cookie_snapshot()
+    assert snap["ok"] is True
+    assert snap["count"] == 2, "只数本站的 Cookie"
+    assert set(snap["names"]) == {"express.sid", "csrf"}
+
+
+def test_cookie_snapshot_before_open_is_not_ok():
+    sess = LoginSession({"browser": {}}, __import__("pathlib").Path("."),
+                        _site(needs_login=True))
+    assert sess.cookie_snapshot()["ok"] is False
+
+
+def test_cookie_snapshot_survives_broken_context():
+    sess, _p, _f = _session([("https://galgame.dev/", "", "")])
+
+    class _Boom:
+        def cookies(self):
+            raise RuntimeError("context closed")
+
+    sess._sess = type("S", (), {"context": _Boom()})()
+    snap = sess.cookie_snapshot()
+    assert snap["ok"] is False
+    assert "context closed" in snap["reason"]

@@ -39,8 +39,8 @@ from .models import Site
 
 log = logging.getLogger("gamefinder.login")
 
-# 登录成功判据：落地 URL 不再是登录页。只认路径，不扫正文 ——
-# 页面导航里到处都有「登录」二字，扫 HTML 必然误判。
+# 登录页判据只看**路径**：页面导航里到处都有「登录」二字，扫正文必然误判。
+# （真正的登录成功判据在 looks_logged_in：路径 + 正文双条件。）
 LOGIN_PATH_RE = re.compile(
     r"/(?:login|log-in|signin|sign-in|sign_in|auth|account/login)(?:[/?#]|$)",
     re.I,
@@ -48,6 +48,7 @@ LOGIN_PATH_RE = re.compile(
 
 # 轮询间隔与上限：用户点完登录到 Cookie 生效通常 < 2s，
 # 但有人会先注册再登录，给足 10 分钟。
+# 可在 config.yaml 的 login.timeout_s / login.poll_ms 覆盖（打包验收要用短超时）。
 POLL_MS = 1000
 TIMEOUT_S = 600
 
@@ -129,12 +130,26 @@ class LoginSession:
     config: dict[str, Any]
     project_root: Path
     site: Site
-    timeout_s: int = TIMEOUT_S
-    poll_ms: int = POLL_MS
+    # None = 用 config.yaml 的 login.timeout_s / login.poll_ms，缺省 600s / 1000ms
+    timeout_s: int | None = None
+    poll_ms: int | None = None
     # 便于测试注入（默认用真实 BrowserSession）
     session_factory: Callable[..., Any] | None = None
     _sess: Any = field(default=None, init=False, repr=False)
     _page: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        cfg = (self.config or {}).get("login") or {}
+        if self.timeout_s is None:
+            try:
+                self.timeout_s = int(cfg.get("timeout_s") or TIMEOUT_S)
+            except (TypeError, ValueError):
+                self.timeout_s = TIMEOUT_S
+        if self.poll_ms is None:
+            try:
+                self.poll_ms = int(cfg.get("poll_ms") or POLL_MS)
+            except (TypeError, ValueError):
+                self.poll_ms = POLL_MS
 
     def __enter__(self) -> "LoginSession":
         if not _LOCK.acquire(blocking=False):
@@ -214,6 +229,31 @@ class LoginSession:
                     elapsed_s=round(elapsed, 1),
                 )
             page.wait_for_timeout(self.poll_ms)
+
+    def cookie_snapshot(self) -> dict:
+        """关窗后确认登录态真的落盘了。
+
+        为什么需要：`wait_for_login` 的判据是**页面**看起来已登录，
+        而 Cookie 要等 Chrome 异步刷盘。用户登完立刻关窗口时，
+        页面已经显示「退出」但磁盘上可能还没有 —— 这时重搜仍是登录墙，
+        用户会以为功能坏了。这里主动问一次浏览器，并把 Cookie 写盘。
+        """
+        if self._sess is None:
+            return {"ok": False, "reason": "窗口已关闭"}
+        try:
+            cookies = self._sess.context.cookies()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        host = ""
+        from urllib.parse import urlparse
+
+        try:
+            host = (urlparse(self.site.homepage).hostname or "").lower()
+        except ValueError:
+            host = ""
+        mine = [c for c in (cookies or []) if host and host in (c.get("domain") or "")]
+        return {"ok": True, "count": len(mine),
+                "names": sorted({c.get("name", "") for c in mine})[:8]}
 
 
 def login_state(config: dict[str, Any], project_root: Path, site: Site) -> dict:

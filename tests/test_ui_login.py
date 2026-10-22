@@ -186,3 +186,32 @@ def test_api_login_state_endpoint(client, monkeypatch):
 def test_api_login_state_unknown_site_is_false_not_500(client):
     body = client.get("/api/login/state", params={"site_id": "nope"}).json()
     assert body["logged_in"] is False
+
+
+def test_api_login_reports_cookie_snapshot(client, monkeypatch):
+    """关窗前问一次浏览器，把「Cookie 到底有没有落盘」回给前端。"""
+    from finder import login as login_mod
+    from finder.web import server as srv
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def wait_for_login(self):
+            return login_mod.LoginResult(
+                ok=True, site_id="galgame.dev", url="https://galgame.dev/",
+                message="登录成功，登录态已保存", elapsed_s=3.0)
+
+        def cookie_snapshot(self):
+            return {"ok": True, "count": 2, "names": ["csrf", "express.sid"]}
+
+    monkeypatch.setattr(srv, "LoginSession", _Fake)
+    body = client.post("/api/login", json={"site_id": "galgame.dev"}).json()
+    assert body["ok"] is True
+    assert body["cookies"]["count"] == 2

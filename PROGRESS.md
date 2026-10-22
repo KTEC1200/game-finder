@@ -32,7 +32,7 @@ python app.py
 
 | 维度 | 结论 |
 |---|---|
-| 代码 / 测试 | ✅ **571 个离线测试全绿**（2026-10-22 复跑；新增 33 例免代理回退 + 打包路径，43 例引擎兜底，6 例启动器 CLI，54 例手动登录） |
+| 代码 / 测试 | ✅ **578 个离线测试全绿**（2026-10-22 复跑；新增 33 例免代理回退 + 打包路径，43 例引擎兜底，6 例启动器 CLI，61 例手动登录） |
 | 免代理 | ✅ **自动探测 + 回退直连**：`proxy.auto_detect` 探 6234，不通就直连（实测 18/19 站直连可用） |
 | 便携版 | ✅ **PyInstaller onedir + zip**，142.8 MB / 60.9 MB 压缩包，解压双击即用，已在新路径实测 |
 | 引擎兜底 | ✅ 有下载链接的站点 < 3 时，结果区上方给必应/百度/谷歌/Yandex **跳转链接**（只拼 URL，不发请求） |
@@ -494,7 +494,15 @@ Yandex也进行搜索和整合，不过不用给出结果，给跳转链接就�
     失败结果缓存 30 分钟。登完必须 `search(true)` 强制刷新，否则用户看到
     的还是「需要登录」，会以为登录没生效（`test_login_success_forces_a_refresh`）。
 
-49. **UI 判据只认 `d.outcome`，不许在 JS 里解析 error 字串**
+49. **页面显示「退出」≠ Cookie 已落盘**
+    `wait_for_login` 的判据是**页面**看起来已登录；Cookie 要等 Chrome 异步刷盘。
+    用户登完立刻关窗口时，页面已经是「退出」但磁盘上可能还没有 —— 重搜仍是登录墙，
+    用户会以为功能坏了。修法：`LoginSession.cookie_snapshot()` 在关窗前主动
+    `context.cookies()` 问一次浏览器（这一步本身会促成刷盘），把本站 Cookie 条数
+    回给前端做诊断。**它只是诊断**：快照失败绝不能把「登录成功」变成失败
+    （`server.py` 里单独 try 包住；这条是被 `test_api_login_returns_ok_when_session_succeeds` 抓出来的）。
+
+50. **UI 判据只认 `d.outcome`，不许在 JS 里解析 error 字串**
     第一版写成 `String(d.error||'').split(':')[0]` 判前缀，直接被
     `tests/test_result_order.py::test_html_does_not_parse_error_prefixes` 拦下 ——
     那条规则是第三轮为了「四档排序只认后端」立的。
@@ -634,7 +642,7 @@ finder/store.py             SQLite 缓存（成功 12h / 失败 30min）+ 健康
 finder/web/server.py        FastAPI + SSE，支持 refresh 强制刷新；有链接站点 < 3 时发 engines 帧
                             /api/login（开窗口等用户登录）+ /api/login/state（只读探测）
 finder/web/static/index.html  单页 UI（引擎兜底块 + 需要登录的站卡片上的登录按钮）
-tests/                      571 个离线测试 + fixtures
+tests/                      578 个离线测试 + fixtures
 tools/build_portable.py     构建便携版 + 打 zip
 tools/probe_engines_ui.py   真机验证引擎兜底块（真 Chrome + 真服务，结果写 JSON）
 tools/probe_packaged_engines.py  同上，但跑解压后的 exe（验 _internal 里的静态资源）

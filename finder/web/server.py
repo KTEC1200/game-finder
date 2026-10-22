@@ -160,6 +160,13 @@ def create_app() -> FastAPI:
         try:
             with LoginSession(CONFIG, ROOT, target) as sess:
                 result = sess.wait_for_login()
+                # 页面说已登录 != Cookie 已落盘。关窗前主动问一次浏览器，
+                # 免得用户登完立刻关窗口、Cookie 没刷盘、重搜还是登录墙。
+                # 这只是**诊断信息**：它失败绝不能把「登录成功」变成失败。
+                try:
+                    snapshot = sess.cookie_snapshot() if result.ok else {}
+                except Exception:  # noqa: BLE001
+                    snapshot = {}
         except RuntimeError as exc:  # 已有窗口开着
             return {"ok": False, "site_id": site_id, "message": str(exc)}
         except Exception as exc:  # noqa: BLE001 - 起浏览器失败等
@@ -170,6 +177,7 @@ def create_app() -> FastAPI:
             "ok": result.ok, "site_id": result.site_id, "url": result.url,
             "message": result.message, "elapsed_s": result.elapsed_s,
             "cancelled": result.cancelled,
+            "cookies": snapshot,
         }
 
     @app.get("/api/login/state")
