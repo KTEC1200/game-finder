@@ -1,8 +1,10 @@
-"""FastAPI + SSE。搜索按语种路由后流式推送。"""
+"""FastAPI + SSE。搜索按语种路由后**边搜边推**。"""
 from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from dataclasses import asdict
 from pathlib import Path
 
@@ -104,12 +106,15 @@ def order_results(
 
 def _run_pipeline(
     config: dict, sites: list[Site], query: str, root: Path,
-    use_cache: bool = True,
+    use_cache: bool = True, on_result=None,
 ) -> list[GameDetail]:
     """真实现。测试里会被 monkeypatch 掉，避免起浏览器。
 
     这里负责 Store 的生命周期：sqlite 连接不能跨线程共享，所以每次搜索
     新开一个（打开 + 建表都是毫秒级，不值得为它引入连接池）。
+
+    `on_result(detail)` 每站一有结果就回调（在 pipeline 的 worker 线程里）——
+    SSE 靠它把「第一张卡」从 35s 提前到 3–6s。
     """
     from ..pipeline import run
     from ..store import Store
@@ -117,7 +122,8 @@ def _run_pipeline(
     db = root / "data" / "finder.db"
     ttl = int((config.get("cache") or {}).get("ttl_hours") or 12)
     with Store(db, ttl) as st:
-        return run(config, sites, query, root, store=st, use_cache=use_cache)
+        return run(config, sites, query, root, store=st, use_cache=use_cache,
+                   on_result=on_result)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -204,20 +210,56 @@ def create_app() -> FastAPI:
                 "skipped": [{"id": s.id, "name": s.name,
                              "reason": "LANG_MISMATCH"} for s in skipped],
             })
-            try:
-                results = _run_pipeline(CONFIG, part, query, ROOT, use_cache)
-            except Exception as exc:  # noqa: BLE001
-                yield _sse("error", {"message": f"{type(exc).__name__}: {str(exc)[:200]}"})
+
+            # v0.1.2 真流式：pipeline.run 丢到后台线程，每站一出结果就推一帧。
+            # 旧实现 `results = _run_pipeline(...)` 要等**全部**站点跑完才发第一帧
+            # （2026-10-23 实测 zh 35.5s / en 55.5s），用户看到的是一整段空白。
+            # 现在第一张卡 3–6s 就到，慢站陆续补上。
+            chunks: queue.Queue = queue.Queue()
+            box: dict[str, object] = {}
+
+            def on_result(detail: GameDetail) -> None:
+                chunks.put(("result", detail))
+
+            def work() -> None:
+                try:
+                    box["results"] = _run_pipeline(
+                        CONFIG, part, query, ROOT, use_cache, on_result=on_result
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    box["error"] = exc
+                finally:
+                    chunks.put(("done", None))
+
+            threading.Thread(target=work, name="gf-search", daemon=True).start()
+
+            streamed: list[GameDetail] = []
+            while True:
+                kind, payload = chunks.get()
+                if kind == "done":
+                    break
+                streamed.append(payload)
+                frame = asdict(payload)
+                # 让 UI 按档上色/分组，而不必在 JS 里解析错误字串
+                frame["outcome"] = outcome_of(payload)
+                yield _sse("result", frame)
+
+            err = box.get("error")
+            if err is not None:
+                yield _sse("error", {"message": f"{type(err).__name__}: {str(err)[:200]}"})
                 yield _sse("done", {"ok": 0, "total": len(part)})
                 return
-            ok = 0
-            # _run_pipeline 先把整个 list 拿回来，之后才逐条发帧，
-            # 所以排序放后端是零成本的（不需要在 JS 里重排 DOM）。
+
+            results = box.get("results")
+            if not isinstance(results, list):
+                results = streamed
+            ok = sum(1 for d in results if not d.error)
             tier_by_site = {s.id: s.tier for s in part}
             ordered = order_results(results, tier_by_site)
             # 资源站没找够（有链接的站点 < 3）时补一块「去搜索引擎再找」。
-            # 这一帧只带跳转链接，不带任何引擎结果；放在 result 之前，
-            # 前端于是先建好结果区上方那个容器。顺序与阈值见 finder/engines.py。
+            # 这一帧只带跳转链接，不带任何引擎结果。必须在全部结果之后才能
+            # 数清「有几个站给了链接」—— 所以它从「result 之前」挪到了这里，
+            # 前端 #engines 容器本来就在 DOM 里常驻，不依赖帧顺序。
             fallback, linked = needs_fallback(results)
             if fallback:
                 yield _sse("engines", {
@@ -226,13 +268,9 @@ def create_app() -> FastAPI:
                     "threshold": MIN_LINKED_SITES,
                     "links": engine_links(query),
                 })
-            for d in ordered:
-                if not d.error:
-                    ok += 1
-                payload = asdict(d)
-                # 让 UI 按档上色/分组，而不必在 JS 里解析错误字串
-                payload["outcome"] = outcome_of(d)
-                yield _sse("result", payload)
+            # 结果帧是按**完成顺序**推的；这一帧给出最终排序（直链 → 网盘 →
+            # 无下载 → 未找到，备用站排同档最后），前端据此把卡片重排一次。
+            yield _sse("order", {"site_ids": [d.site_id for d in ordered]})
             yield _sse("done", {"ok": ok, "total": len(results)})
 
         return StreamingResponse(gen(), media_type="text/event-stream")

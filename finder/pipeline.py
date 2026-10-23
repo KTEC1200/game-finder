@@ -24,8 +24,11 @@ from __future__ import annotations
 import base64
 import html as html_mod
 import json
+import logging
 import queue
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +60,11 @@ from urllib.parse import urlparse
 SEARCH_TIMEOUT = 45000
 DETAIL_TIMEOUT = 45000
 SETTLE_MS = 2500
+
+# v0.1.1 -> v0.1.2 回归：pipeline.py 里 3 处 log.info/warning 没有 logger，
+# ensure_logged_in 一旦真的登录成功就 NameError，整次搜索直接崩掉。
+# 单测全程不触发登录路径，所以 578 个测试全绿也发现不了。
+log = logging.getLogger("gamefinder.pipeline")
 
 # 排版空白（不间断空格 U+00A0 / 全角空格 U+3000 等）归一成普通空格。
 # ggbases 空结果页输出 `0\xa0個資源`，不做归一化标记永远匹配不上。
@@ -124,9 +132,18 @@ NO_RESULTS_MARKERS = (
 
 
 def _settle(page, ms: int = SETTLE_MS) -> None:
-    """尽量等页面安静下来；networkidle 超时不算错误（很多站有长连接）。"""
+    """尽量等页面安静下来；networkidle 超时不算错误（很多站有长连接）。
+
+    实测（2026-10-22）：真正的时间大头是这个函数。`ms` 以前**根本没被用**，
+    上限写死 10s，于是每个「永远到不了 networkidle」的站（长连接/心跳/广告位）
+    都要白等满 10 秒 —— 一轮 14 站里有两个站各吃掉 10.01s。
+    现在按 `ms` 走，默认 2.5s：干净的站 0.5～1s 就 idle 返回，不干净的站
+    最多等 ms 就往下走。慢渲染的站由 `_looks_transient` 的重试循环兜底
+    （那里会传更大的 ms）。
+    """
+    cap = ms if isinstance(ms, int) and ms > 0 else SETTLE_MS
     try:
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_load_state("networkidle", timeout=cap)
     except Exception:  # noqa: BLE001
         pass
 
@@ -755,7 +772,13 @@ def search_one(
     if site.search.mode == "url":
         url = build_search_url(site, q)
         status, nav_error = _goto(page, url, timeout_ms, retries=2)
-        _settle(page)
+        # v0.1.2：先解析、再决定要不要等。搜索结果是 SSR/半 SSR 的站（jidiyouxi、
+        # galgame.dev、ggbases…）在 `load` 事件时链接就已经在 DOM 里了，再等
+        # networkidle 纯属白等 0.5–2.5s。解析出候选就跳过 `_settle`；
+        # 解析不到才落到下面的等待 + 原有暂态重试（那条路径一个字都没动）。
+        early_html = _page_content(page)
+        if not (early_html and parse_result_links(early_html, page.url, site)):
+            _settle(page)
         # 站内搜索接口偶发失败会渲染成空列表 + 自己的错误提示，看起来跟
         # 「真的没有」一模一样。jidiyouxi 实测：同一个 URL 前一次正文只有
         # `游戏专区 (0) … 无相关搜索 Network Error`（HTML 54KB），隔几分钟
@@ -966,7 +989,18 @@ def _extract_detail(
         d_status, d_nav_error = extra.get("search_status"), None
     else:
         d_status, d_nav_error = _goto(page, target_url, timeout_ms, retries=2)
-        _settle(page)
+        # v0.1.2：先抽卡再决定要不要等。详情页的标题/下载块通常已在首屏 HTML 里，
+        # 但**只在「已抽到下载 + 内容证据已成立」时**才跳过 networkidle 等待 ——
+        # 证据闸门依赖正文可见文本，正文晚渲染时跳过会误报 WRONG_GAME。
+        early_html = _page_content(page)
+        early_card = extract_card(early_html, page.url, site.id) if early_html else None
+        skip_settle = False
+        if early_card is not None and early_card.downloads:
+            early_body = _detail_body_text(page, early_html or "")
+            early_ok, _ef, _er = _query_evidence_ok(q, early_card.title, early_body)
+            skip_settle = early_ok
+        if not skip_settle:
+            _settle(page)
     detail_url = page.url
     detail_html = _page_content(page)
     if detail_html is None:
@@ -1618,7 +1652,17 @@ def _fetch_popup_redirect_links(
                 opener = _first_visible(page, open_sel)
                 if opener is not None:
                     opener.click(timeout=min(timeout_ms, 8000))
-                    page.wait_for_timeout(2000)
+                    # v0.1.2：供应商按钮通常点完 0.2–1s 就渲染出来，改成轮询
+                    # （每 250ms 查一次，上限仍是 2s），别再无脑等满。
+                    waited = 0
+                    while waited < 2000:
+                        try:
+                            if page.locator(selector).count() > 0:
+                                break
+                        except Exception:  # noqa: BLE001
+                            break
+                        page.wait_for_timeout(_PROVIDER_POLL_MS)
+                        waited += _PROVIDER_POLL_MS
             except Exception as exc:  # noqa: BLE001
                 errs.append(f"open: {type(exc).__name__}")
 
@@ -1711,6 +1755,42 @@ def _fetch_popup_redirect_links(
     return out
 
 
+def _wait_reveal(
+    page, site: Site, detail_url: str, timeout_ms: int = 3000, step_ms: int = 250
+) -> bool:
+    """点开「下载/资源」标签页后等目标出现，最多 `timeout_ms`。
+
+    v0.1.2 性能改动（实测）：touchgal 的 resource 链接点了之后 0.2–1s 就渲染出来，
+    旧代码固定 `wait_for_timeout(3000)` 白等两次（搜索页/详情页各一次）就能吃掉
+    6s。改成「出现即走」：
+      - 站里配了 `detail_follow_pattern`：等页面出现匹配的 href；
+      - 只配 `detail_open_selector`（就地展开，kungal）：等真的抽到下载链接。
+    等不到也不报错 —— 调用方继续按原逻辑处理空结果。
+    """
+    pattern = site.search.detail_follow_pattern
+    rx = re.compile(pattern) if pattern else None
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+    while True:
+        try:
+            html = page.content()
+        except Exception:  # noqa: BLE001
+            html = ""
+        if html:
+            if rx is not None:
+                for m in re.finditer(r'href=["\']([^"\']+)["\']', html, re.I):
+                    url = urljoin(detail_url, m.group(1))
+                    if rx.search(urlparse(url).path or "") and url != detail_url:
+                        return True
+            elif extract_card(html, detail_url, site.id).downloads:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(step_ms)
+        except Exception:  # noqa: BLE001
+            return False
+
+
 def _follow_detail_gate(
     page, site: Site, detail_url: str, timeout_ms: int, extra: dict[str, Any]
 ) -> GameDetail | None:
@@ -1743,7 +1823,9 @@ def _follow_detail_gate(
                     empty = False
                 if not empty:
                     el.click(timeout=8000)
-                    page.wait_for_timeout(3000)
+                    # v0.1.2：不再无条件干等 3s —— 每 250ms 查一次目标是否出现，
+                    # 出现立刻走；3s 只是上限（kungal 这种点完不跳转的站照旧吃满）。
+                    _wait_reveal(page, site, detail_url, 3000)
                     opened = open_sel
         except Exception as exc:  # noqa: BLE001
             extra["detail_open_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
@@ -1820,6 +1902,22 @@ def normalize_query(query: str | None) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def _search_in_session(
+    sess, site: Site, query: str, timeout: int
+) -> GameDetail:
+    """在一个已打开的浏览器会话里搜一个站（每站一个新 tab）。"""
+    page = None
+    try:
+        page = sess.new_page()
+        return search_one(page, site, query, timeout_ms=timeout)
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _run_one_site(
     config: dict,
     root: Path,
@@ -1829,11 +1927,15 @@ def _run_one_site(
     store,
     cache_on: bool,
     profile_override: Path | None,
+    sess=None,
 ) -> GameDetail:
     """单站的完整流程（含缓存读写）。供串行与并发两条路径共用。
 
     profile_override 为 None 时用主 profile（串行路径）；并发时每个 worker
     传自己的目录 —— Chrome 会锁住 user-data-dir，共享目录会有一个失败。
+
+    sess 非空时**复用**这个已打开的会话，不再自己起停浏览器：
+    起停一次 Chrome 约 1.4s（实测），14 个站就白花 20 秒。
     """
     from .browser import BrowserSession
 
@@ -1846,23 +1948,82 @@ def _run_one_site(
             hit.extra["cached"] = True
             return hit
 
-    page = None
-    with BrowserSession.for_site(config, root, site,
-                                 profile_override=profile_override) as sess:
-        try:
-            page = sess.new_page()
-            card = search_one(page, site, query, timeout_ms=timeout)
-        finally:
-            if page is not None:
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
+    if sess is not None:
+        card = _search_in_session(sess, site, query, timeout)
+    else:
+        with BrowserSession.for_site(config, root, site,
+                                     profile_override=profile_override) as own:
+            card = _search_in_session(own, site, query, timeout)
     if cache_on:
         # 失败也写缓存，但 Store 对带 error 的条目用更短的 fail_ttl 过期
         # （默认 30 分钟）——否则重复搜索会被失败站拖慢到和首次一样。
         store.put_cached(key, card)
     return card
+
+
+def ensure_logged_in(
+    config: dict, sites: list[Site], project_root: Path, *, force: bool = False
+) -> dict[str, str]:
+    """有凭据的站，在**搜索开始之前**先自动登录一次。
+
+    为什么必须在播种 worker profile 之前：并发搜索用的 `chrome-profile-w<N>`
+    是从主 profile 复制出来的（`seed_worker_profile`）。如果登录发生在播种
+    之后，worker 手里还是旧 Cookie，症状是「登录明明成功了，搜索仍然撞登录墙」
+    —— 而且**没有任何报错**，只能靠猜。所以登录放在这里。
+
+    返回 {site_id: 结果说明}，只用于日志与 UI 展示；任何失败都不抛异常，
+    失败后该站照常跑搜索，最终报 NEEDS_LOGIN，UI 会退回「手动登录」按钮。
+    """
+    from . import login as login_mod
+
+    root = Path(project_root)
+    creds = login_mod.load_credentials(root)
+    if not creds:
+        return {}
+    out: dict[str, str] = {}
+    cfg_login = (config or {}).get("login") or {}
+    if cfg_login.get("auto") is False:
+        return {}
+    for site in sites:
+        if not site.needs_login:
+            continue
+        cred = creds.get(site.id)
+        if not cred:
+            continue
+        if not force and not login_mod.should_refresh(config, root, site):
+            out[site.id] = "仍在上次登录的有效期内，跳过"
+            continue
+        result = login_mod.auto_login(config, root, site, cred)
+        out[site.id] = result.message or ("登录成功" if result.ok else "登录失败")
+        if result.ok:
+            log.info("自动登录成功：%s（%.1fs）", site.id, result.elapsed_s)
+        else:
+            log.warning("自动登录失败：%s — %s", site.id, result.message)
+    return out
+
+
+def _site_cost_hint(site: Site) -> int:
+    """并发派发用的**粗排**：只决定谁先上，不参与任何正确性判断。
+
+    依据 2026-10-23 实测（tools/probe_speed_proxy.json）：form 模式
+    （touchgal/anime-sharing/nekogal/sayafx 11–16s）、弹窗收链（galgamex 15s）、
+    二次跳转（touchgal）最慢；index / 直链站 3–8s。分数只是序，不是耗时预测。
+    """
+    s = site.search
+    score = 0
+    if s.mode == "form":
+        score += 10
+    if s.download_flow == "popup_redirect":
+        score += 8
+    elif s.download_flow in ("ggbases", "ankergames", "inarigal"):
+        score += 4
+    if s.detail_follow_pattern:
+        score += 6
+    elif s.detail_open_selector:
+        score += 3
+    if s.mode == "index":
+        score -= 2
+    return score
 
 
 def run(
@@ -1874,8 +2035,12 @@ def run(
     use_cache: bool = True,
     workers: int | None = None,
     profile: Path | str | None = None,
+    on_result=None,
 ) -> list[GameDetail]:
     """对一组站点跑搜索。返回顺序**始终**与传入 sites 一致。
+
+    `on_result(detail)`：每站一有结果就回调（在 worker 线程里），用于 SSE 增量
+    推送 —— 用户不用等最慢的站。回调异常一律吞掉，绝不影响搜索本身。
 
     workers（并发度）：
       - None / 1 → 串行，用主 profile（chrome-profile），行为与旧版一致
@@ -1912,21 +2077,38 @@ def run(
         n_workers = 1
     n_workers = max(1, min(n_workers, max(1, len(sites))))
 
+    # 自动登录必须在**播种 worker profile 之前**（见 ensure_logged_in 的注释）。
+    try:
+        ensure_logged_in(config, sites, root)
+    except Exception as exc:  # noqa: BLE001 - 登录挂了不能带崩整次搜索
+        log.warning("自动登录流程异常：%s: %s", type(exc).__name__, exc)
+
     headless_idx = [i for i, s in enumerate(sites) if not s.force_headful]
     headful_idx = [i for i, s in enumerate(sites) if s.force_headful]
     results: dict[int, GameDetail] = {}
 
-    def _safe(idx: int, profile: Path | None) -> None:
+    def _emit(detail: GameDetail | None) -> None:
+        """一有结果就推给调用方（SSE 真流式的关键）。回调炸了不能带崩搜索。"""
+        if detail is None or on_result is None:
+            return
+        try:
+            on_result(detail)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _safe(idx: int, profile: Path | None, sess=None) -> None:
         site = sites[idx]
         try:
             results[idx] = _run_one_site(
-                config, root, site, query, timeout, store, cache_on, profile
+                config, root, site, query, timeout, store, cache_on, profile,
+                sess=sess,
             )
         except Exception as exc:  # noqa: BLE001
             results[idx] = GameDetail(
                 site_id=site.id, url=site.homepage, title="",
                 error=f"{type(exc).__name__}: {str(exc)[:150]}",
             )
+        _emit(results[idx])
 
     # ---- 串行路径（workers=1，行为与旧版一致；显式 profile 也走这里）----
     if n_workers == 1:
@@ -1957,6 +2139,7 @@ def run(
                                 page.close()
                             except Exception:  # noqa: BLE001
                                 pass
+                        _emit(results.get(idx))  # type: ignore[arg-type]
         return [results[i] for i in range(len(sites))]
 
     # ---- 并发路径：每个 worker 一份独立 profile ----
@@ -1970,21 +2153,72 @@ def run(
     # profile 是**独占资源**：Chrome 会锁住 user-data-dir，两个线程同时用一个
     # 目录必有一个 TargetClosedError（实测）。所以用队列发放，用完归还——
     # 而不是按下标取模（那样 11 站 3 槽会出现多线程共用同一目录）。
-    available: queue.Queue[Path] = queue.Queue()
-    for p in profiles:
-        available.put(p)
+    # 每个 worker **独占一个 profile，并在这个线程里自己开、自己关**浏览器。
+    #
+    # 为什么不能像以前那样「主线程统一关闭」：Playwright 的 sync API 绑定在
+    # 创建它的线程上，跨线程 close 会抛 `error cannot switch to a different
+    # thread`。异常被吞掉后 Chrome 进程留在原地、profile 目录被锁住，下一次
+    # 搜索所有站都 TargetClosedError —— 实测就是这个现象（连做两次搜索，
+    # 第二次 16 个站全在 2 秒内失败）。
+    #
+    # 站点**动态派发**（work-stealing）：以前按 `i % n_workers` 静态分块，
+    # 14 站 5 槽时最慢的槽要独自背 3 个慢站，别的槽早空了也帮不上 —— 实测
+    # 墙钟被最长槽拖死。改成共享队列后，谁先跑完谁拿下一站。
+    # 队列顺序按「预估耗时从高到低」排（`_site_cost_hint`），慢站先派出去，
+    # 避免它们最后一刻才开始。这个顺序只影响调度，不参与任何正确性判断。
+    work: queue.Queue[int] = queue.Queue()
+    for idx in sorted(headless_idx, key=lambda i: _site_cost_hint(sites[i]), reverse=True):
+        work.put(idx)
 
-    def _task(idx: int) -> None:
-        profile = available.get()
+    def _worker(w: int) -> None:
+        profile = profiles[w]
+        sess = None
         try:
-            _safe(idx, profile)
+            while True:
+                try:
+                    idx = work.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    if sess is None:
+                        sess = BrowserSession.for_site(
+                            config, root, sites[idx], profile_override=profile
+                        ).__enter__()
+                    _safe(idx, profile, sess)
+                except Exception:  # noqa: BLE001
+                    # 浏览器自己挂了（TargetClosedError 之类）：在本线程关掉、
+                    # 重开一次重试这个站，否则本线程后面每个站都会连着失败。
+                    if sess is not None:
+                        try:
+                            sess.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        sess = None
+                    _safe(idx, profile, None)
         finally:
-            available.put(profile)
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_task, idx) for idx in headless_idx]
-        for fut in as_completed(futures):
-            fut.result()  # _safe 已兜住异常；这里只等完成
+    threads = [
+        threading.Thread(target=_worker, args=(w,), name=f"gf-worker-{w}", daemon=True)
+        for w in range(n_workers)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 任何站没留下结果（worker 意外死掉）都要补一张卡，返回值长度永远等于站数。
+    for i in range(len(sites)):
+        if i not in results:
+            results[i] = GameDetail(
+                site_id=sites[i].id, url=sites[i].homepage, title="",
+                error="WORKER_LOST: no result for this site",
+            )
+            _emit(results[i])
 
     # headful 组始终串行（人工过盾场景，并发没意义还会抢窗口）
     if headful_idx:
@@ -2010,6 +2244,7 @@ def run(
                             page.close()
                         except Exception:  # noqa: BLE001
                             pass
+                    _emit(results.get(idx))  # type: ignore[arg-type]
 
     return [results[i] for i in range(len(sites))]
 

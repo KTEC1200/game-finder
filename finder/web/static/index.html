@@ -329,6 +329,16 @@ function renderEngines(d) {
   engines.style.display = 'block';
 }
 
+// 结果帧按「谁先跑完谁先到」的顺序追加；后端在 done 前发一帧 order
+// （直链 → 网盘 → 无下载 → 未找到，备用站排同档最后），这里按它把卡片
+// 重排一次。顺序完全由后端给的 site_ids 决定 —— JS 里不解析任何错误字串。
+function applyOrder(ids) {
+  if (!Array.isArray(ids)) return;
+  const bySite = {};
+  for (const c of out.children) bySite[c.dataset.site] = c;
+  ids.forEach(id => { const c = bySite[id]; if (c) out.appendChild(c); });
+}
+
 async function search(refresh) {
   const query = input.value.trim();
   if (!query) return;
@@ -375,6 +385,8 @@ async function search(refresh) {
         out.appendChild(renderCard(data));
       } else if (ev === 'engines') {
         renderEngines(data);
+      } else if (ev === 'order') {
+        applyOrder(data.site_ids);
       } else if (ev === 'error') {
         out.appendChild(renderCard({site_id:'system', title:'出错', error:data.message,
                                     downloads:[]}));

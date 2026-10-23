@@ -229,32 +229,49 @@ def _result_frames(body: str) -> list[dict]:
     return frames
 
 
-def test_search_frames_carry_outcome_and_arrive_sorted(monkeypatch):
+def _order_frame(body: str) -> dict:
+    for blk in body.split("\n\n"):
+        lines = blk.split("\n")
+        ev = next((l[6:].strip() for l in lines if l.startswith("event:")), None)
+        data = next((l[5:].strip() for l in lines if l.startswith("data:")), None)
+        if ev == "order" and data:
+            return json.loads(data)
+    raise AssertionError("没有 order 帧")
+
+
+def test_search_frames_carry_outcome_and_order_frame_sorts(monkeypatch):
     from fastapi.testclient import TestClient
 
     from finder.web import server as srv
 
-    def fake(config, sites, query, root, use_cache=True):
-        # 故意反着给：未找到 / 网盘 / 直链
-        return [
+    def fake(config, sites, query, root, use_cache=True, on_result=None):
+        # 故意反着给：未找到 / 网盘 / 直链（模拟「谁先跑完谁先到」）
+        results = [
             GameDetail(site_id="nf", url=None, title="", error="NO_RESULTS: nope"),
             GameDetail(site_id="pan", url="https://pan.example/1", title="P",
                        downloads=[Download(kind="pan", url="https://pan.example/f")]),
             GameDetail(site_id="direct", url="https://direct.example/1", title="D",
                        downloads=[Download(kind="direct", url="https://direct.example/f")]),
         ]
+        if on_result:
+            for d in results:
+                on_result(d)
+        return results
 
     monkeypatch.setattr(srv, "_run_pipeline", fake)
     client = TestClient(srv.create_app())
     with client.stream("POST", "/api/search", json={"query": "abc"}) as r:
         body = "".join(r.iter_text())
 
+    # v0.1.2 真流式：result 帧按**完成顺序**到（这里就是 fake 的回调顺序），
+    # 最终排序由 order 帧给出，前端据此重排 DOM。
     frames = _result_frames(body)
-    assert [f["site_id"] for f in frames] == ["direct", "pan", "nf"]
-    assert [f["outcome"] for f in frames] == ["direct", "pan", "not_found"]
+    assert [f["site_id"] for f in frames] == ["nf", "pan", "direct"]
+    assert [f["outcome"] for f in frames] == ["not_found", "pan", "direct"]
+    assert _order_frame(body)["site_ids"] == ["direct", "pan", "nf"]
     # 既有字段一个都不许少（UI 仍在用）
     assert {"site_id", "url", "title", "downloads", "error", "extra"} <= set(frames[0])
-    assert frames[0]["downloads"][0]["kind"] == "direct"
+    assert frames[0]["downloads"] == []
 
 
 def test_api_sites_exposes_homepage_and_tier():
@@ -322,6 +339,13 @@ def test_html_loads_the_site_table_once_for_names_and_homepages(src):
     assert "fetch('/api/sites')" in src
     assert "SITES[s.id] = " in src
     assert "site.homepage" in src
+
+
+def test_html_reorders_cards_when_order_frame_arrives(src):
+    """真流式：卡片按完成顺序 append，收到 order 帧后按最终排序重排一次。"""
+    assert "function applyOrder(ids)" in src
+    assert "applyOrder(data.site_ids)" in src
+    assert "c.dataset.site" in src
 
 
 def test_html_does_not_parse_error_prefixes(src):

@@ -12,9 +12,14 @@ def recorded(monkeypatch):
 
     seen: list[bool] = []
 
-    def fake(config, sites, query, root, use_cache=True):
+    def fake(config, sites, query, root, use_cache=True, on_result=None):
         seen.append(use_cache)
-        return [GameDetail(site_id=sites[0].id, url="u", title="t")] if sites else []
+        if not sites:
+            return []
+        d = GameDetail(site_id=sites[0].id, url="u", title="t")
+        if on_result:
+            on_result(d)
+        return [d]
 
     monkeypatch.setattr(srv, "_run_pipeline", fake)
     return TestClient(srv.create_app()), seen

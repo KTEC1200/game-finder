@@ -6,16 +6,18 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def client(monkeypatch):
     # 让 server 不真的起浏览器：把 pipeline.run 替换成假实现
+    from finder.models import GameDetail
     from finder.web import server as srv
-    monkeypatch.setattr(
-        srv, "_run_pipeline",
-        lambda config, sites, query, root, use_cache=True: [
-            __import__("finder.models", fromlist=["GameDetail"]).GameDetail(
-                site_id=sites[0].id, url="https://e.com/1", title="fake") if sites else
-            __import__("finder.models", fromlist=["GameDetail"]).GameDetail(
-                site_id="none", url="u", title="")
-        ],
-    )
+
+    def fake(config, sites, query, root, use_cache=True, on_result=None):
+        if not sites:
+            return []
+        d = GameDetail(site_id=sites[0].id, url="https://e.com/1", title="fake")
+        if on_result:
+            on_result(d)
+        return [d]
+
+    monkeypatch.setattr(srv, "_run_pipeline", fake)
     return TestClient(srv.create_app())
 
 

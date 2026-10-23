@@ -23,8 +23,8 @@ search:
   # 并发度。1 = 串行（用主 profile）。>1 时每个 worker 一份独立 profile
   # （chrome-profile-w<N>），启动前从主 profile 播种登录态。
   # 实测：同 profile 并发会被 Chrome 锁住，独立目录 3 并发 5.3s 全部成功。
-  # 建议 3–4：再多收益递减，且目标站多有自己的限流。
-  workers: 3
+  # 建议 4–6：再多收益递减，且目标站多有自己的限流。
+  workers: 5
 
 login:
   # 「打开浏览器手动登录」等多久算超时（秒）。有人会先注册再登录，给足 10 分钟。

@@ -34,10 +34,14 @@ def _pan(i: int = 0) -> Download:
 
 def _client(monkeypatch, results: list[GameDetail]) -> TestClient:
     from finder.web import server as srv
-    monkeypatch.setattr(
-        srv, "_run_pipeline",
-        lambda config, sites, query, root, use_cache=True: list(results),
-    )
+
+    def fake(config, sites, query, root, use_cache=True, on_result=None):
+        if on_result:
+            for d in results:
+                on_result(d)
+        return list(results)
+
+    monkeypatch.setattr(srv, "_run_pipeline", fake)
     return TestClient(srv.create_app())
 
 
@@ -149,12 +153,30 @@ def test_done_frame_keeps_ok_total_semantics(monkeypatch):
     assert done == {"ok": 2, "total": 3}
 
 
-def test_engines_frame_comes_before_result_frames(monkeypatch):
-    """兜底块在结果区上方，帧顺序也要在 result 之前，前端才能先建容器。"""
+def test_engines_frame_comes_after_results_and_before_done(monkeypatch):
+    """v0.1.2 真流式：有链接的站数只有全部结果到齐才知道，所以兜底帧从
+    「result 之前」挪到了「result 之后、done 之前」。前端 #engines 容器是
+    常驻节点，不依赖帧顺序。"""
     client = _client(monkeypatch, [_card("a", [_pan(1)])])
     names = [n for n, _ in _search(client, "x")]
-    assert names.index("engines") < names.index("result")
+    assert names.index("result") < names.index("engines")
+    assert names.index("engines") < names.index("done")
     assert names[-1] == "done"
+
+
+def test_order_frame_sorts_by_outcome(monkeypatch):
+    """结果帧按完成顺序到；order 帧给出最终排序（直链→网盘→无下载→未找到），
+    前端据此重排一次 DOM。"""
+    client = _client(monkeypatch, [
+        _card("nofound", [], error="NO_RESULTS: x"),
+        _card("pan", [_pan(1)]),
+        _card("direct", [Download(kind="direct", url="https://x.test/a.zip")]),
+    ])
+    frames = _search(client, "x")
+    order = dict(frames)["order"]
+    assert order["site_ids"] == ["direct", "pan", "nofound"]
+    names = [n for n, _ in frames]
+    assert names.index("order") < names.index("done")
 
 
 def test_pipeline_error_still_emits_done(monkeypatch):
