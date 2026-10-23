@@ -775,5 +775,46 @@ tools/probe_packaged_login_roundtrip.py  打包版完整 /api/login 往返（超
 
 - **Store 缓存接线**：缓存键 = `(归一化截断后查询词, site_id)`，成功 12h / 失败 30min，
   `refresh=true` 绕过。实测重复搜索 53.9s → **0.5s**。
-- **并发化**：`config.yaml` 的 `search.workers`（默认 3），每 worker 一份独立
+- **并发化**：`config.yaml` 的 `search.workers`（v0.1.2 起默认 5），每 worker 一份独立
   `chrome-profile-w<N>`，从主 profile 播种登录态（0.02s）。实测 93.1s → **44.1s（2.1x）**。
+
+## v0.1.2（2026-10-23）—— 搜索提速：边搜边出
+
+### 实测（真服务 HTTP 流；zh「千恋万花」/ en「senren banka」）
+
+| | v0.1.1 旧行为 | v0.1.2 |
+|---|---|---|
+| 第一张卡出现 | 等**全部**站点跑完才出（zh 35.5s / en 55.5s） | **4.98s / 4.93s** |
+| 全量跑完 | 35.5s / 55.5s | **22.3s / 24.1s** |
+
+测量脚本：`tools/probe_stream_http.py`（TestClient 会缓冲整个 SSE body，
+量首卡必须连真 uvicorn）。zh 参与 14 站、en 16 站，与 `filter_sites_by_lang` 一致。
+
+### 改了什么
+
+- **`_settle` 的 10s 黑洞**：旧实现忽略传入的 `ms`、写死
+  `wait_for_load_state("networkidle", timeout=10000)`。`probe_settle.json` 实测一轮
+  74.6s 里 settle 占 69.6s（单次 10.01s）。现在按 `SETTLE_MS`（2.5s）封顶。
+- **先解析、解析不到再等**：`search_one` 抓到 HTML 先 `parse_result_links`，有候选就
+  跳过 settle；`_extract_detail` 先 `extract_card`，**抽到下载且证据校验通过**才跳过。
+  后者必须带证据条件 —— 正文晚渲染时跳过会误报 `WRONG_GAME`。
+- **固定等待改轮询**：`_follow_detail_gate` 的 3s、弹窗 tab 的 2s 改成 250ms 轮询，
+  目标一出现就继续；每按钮的 4s provider 轮询上限不变。
+- **派发改共享队列**：静态 `chunks[n % n_workers]` → `queue.Queue` + 慢站优先
+  （`_site_cost_hint` 只决定谁先上，不参与正确性）；线程数不再因空 chunk 缩水。
+- **真流式 SSE**：`run(..., on_result=)` 每站完成即回调；`/api/search` 后台线程 + 队列
+  逐帧推 `result`，全部结束后发 `order`（最终分档排序）再 `done`。前端按 `order`
+  重排一次 DOM，图例承诺的顺序（直链→网盘→无链接→未找到，备用站垫底）不变。
+- **兜底帧位置**：`engines`（去搜索引擎再找）从 `result` 之前挪到之后 —— 「有几个站
+  给了链接」只有全部结果到齐才数得清；前端容器是常驻节点，位置不受影响。
+- **登录站可用性**：登录态检测改看 `body.user-loggedin`（NodeBB 正文里没有「退出」）；
+  页面跳转不再误判「窗口已关闭」；Chrome 启动加 3 次重试吃掉 `TargetClosedError`。
+  凭据只在本地 `credentials.yaml`（gitignore + 打包剔除），仓库不含任何账号信息。
+- **`pipeline` 补 logger**：`ensure_logged_in` 里 3 处 `log.*` 之前会 `NameError`
+  把整次搜索炸掉（自动登录成功后立刻崩），属 v0.1.1 未暴露的 bug。
+
+### 测试
+
+`python -m pytest -q` → **582 passed**（新增真流式回调测试 + order 帧契约 +
+`applyOrder` 静态断言）。
+

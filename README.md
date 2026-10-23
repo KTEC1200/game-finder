@@ -5,6 +5,8 @@
 「没找到」分档。全程在本机跑，只有一个网页界面，没有账号、没有云端。
 
 - **开箱即用**：不装代理也能用（实测 19 站里 18 站直连可访问）。
+- **边搜边出**：站点一有结果就显示，第一张卡通常 5 秒内出现；慢站随后补上，
+  全部跑完后再按分档重排一次（2026-10-23 实测：首卡 4.98s / 全量 22.3s）。
 - **诚实优先**：宁可报「没找到」，也不给一个别的游戏的链接。每个候选标题都要
   通过「查询词证据」校验，通不过就丢掉并说明原因。
 - **找不够就换引擎**：有下载链接的站点少于 3 个时，结果区上方会给出一排
@@ -113,7 +115,7 @@ proxy:
 | `browser.chrome_path` | 空 | 留空则自动查找系统 Chrome |
 | `browser.headless` | true | 无头运行；某些站点需要 `false` |
 | `search.timeout_ms` | 45000 | 单站搜索超时 |
-| `search.workers` | 3 | 并发数，每个 worker 一份独立 Chrome profile |
+| `search.workers` | 5 | 并发数，每个 worker 一份独立 Chrome profile |
 | `cache.ttl_hours` | 12 | 成功结果缓存时长（失败只缓存 30 分钟） |
 | `login.timeout_s` | 600 | 「打开浏览器登录」等多久算超时 |
 
@@ -136,7 +138,7 @@ python tools/build_portable.py
 ## 开发
 
 ```bash
-python -m pytest -q          # 578 个离线测试，约 6 秒
+python -m pytest -q          # 582 个离线测试，约 11 秒
 ```
 
 设计细节、踩过的坑、站点适配状态都在 [`PROGRESS.md`](PROGRESS.md)。
