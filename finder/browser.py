@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,11 @@ from .models import Site
 DEFAULT_CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 ANTI_BOT_ARGS = ["--disable-blink-features=AutomationControlled"]
 FALLBACK_CHROME_VERSION = "155.0.0.0"
+
+# 启动重试：上一次搜索的 Chrome 还没退干净时，复用同一个 profile 立刻再起
+# 会 TargetClosedError（实测）。3 次、间隔 0.5/1.0s，总开销只在上一次没退完时发生。
+LAUNCH_ATTEMPTS = 3
+LAUNCH_RETRY_S = 0.5
 
 # 便携版要能在「config.yaml 里写的是别人机器上的路径」时也跑起来，
 # 所以配置路径失效后按这几处再找一遍（按优先级）。
@@ -352,17 +358,27 @@ class BrowserSession:
         self.user_agent = ua
         self.headless = headless
 
-        self._pw = sync_playwright().start()
-        try:
-            self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
-        except BaseException:
-            # 启动失败也要收掉 playwright，否则 node driver 会残留
+        # profile 目录是独占的：上一次搜索关掉的 Chrome 可能还没完全退出，
+        # 这时立刻用同一个目录再起会 TargetClosedError（实测：连做两次搜索，
+        # 第二次 16 个站全部 2 秒内失败）。所以启动失败要等一下重试。
+        last_exc: BaseException | None = None
+        for attempt in range(LAUNCH_ATTEMPTS):
+            self._pw = sync_playwright().start()
             try:
-                self._pw.stop()
-            finally:
-                self._pw = None
-            raise
-        return self
+                self._ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+                return self
+            except BaseException as exc:  # noqa: BLE001
+                last_exc = exc
+                # 启动失败也要收掉 playwright，否则 node driver 会残留
+                try:
+                    self._pw.stop()
+                finally:
+                    self._pw = None
+                if attempt == LAUNCH_ATTEMPTS - 1:
+                    break
+                time.sleep(LAUNCH_RETRY_S * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
 
     @property
     def context(self):

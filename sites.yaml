@@ -241,6 +241,9 @@ sites:
     # 登录态落在专用 profile 里，之后搜索才走得到 /search。
     needs_login: true
     login_url: "https://galgame.dev/login"
+    # 登录成功的判据：该站（NodeBB）登录后不显示「退出」文案 —— 它在折叠菜单里，
+    # innerText 取不到。可靠信号是 <body class="... user-loggedin ...">。
+    login_success_pattern: "user-loggedin"
     search:
       mode: url
       url_template: "https://galgame.dev/search?term={q}&in=titles"

@@ -59,6 +59,21 @@ LOGGED_IN_MARKERS = (
     "Sign out", "Log out", "My account",
 )
 
+# 本地凭据文件（**永不进仓库**，见 .gitignore 与 build_portable.py 的排除表）。
+CREDENTIALS_FILE = "credentials.yaml"
+
+# 自动登录的缺省超时：程序自己填表比人快，20 秒足够；卡住就放弃、退回人工。
+AUTO_TIMEOUT_S = 20
+
+# 表单选择器：先试站点配置，再按常见形状兜底。
+USERNAME_SELECTORS = (
+    "#username", "input[name=username]", "input[name=email]",
+    "input[type=email]", "input[autocomplete=nickname]",
+    "input[autocomplete=username]",
+)
+PASSWORD_SELECTORS = ("input[type=password]",)
+SUBMIT_TEXTS = ("登录", "登入", "登陆", "login", "log in", "sign in", "signin")
+
 # 同一时刻只允许一个登录窗口（profile 独占）。
 _LOCK = threading.Lock()
 
@@ -77,6 +92,55 @@ def login_url_for(site: Site) -> str | None:
     if site.login_url:
         return site.login_url
     return site.homepage.rstrip("/") + "/login"
+
+
+def _snapshot(page) -> tuple[str, str, str]:
+    """(url, title, blob)。blob = 标题 + 正文 + body 的 class。
+
+    为什么要带上 class：NodeBB（galgame.dev）登录后页面上**没有**「退出」这类
+    正文文案（它们藏在折叠的账号菜单里，`innerText` 取不到），但它会给 body
+    加 `user-loggedin` 类。只扫正文会把「已经登录成功」判成没登进去 ——
+    v0.1.1 的人工登录窗口就是这么一直等到超时的。
+    """
+    url = page.url
+    title = page.title() or ""
+    text = page.evaluate(
+        "() => document.body ? document.body.innerText : ''"
+    ) or ""
+    try:
+        cls = page.evaluate(
+            "() => document.body ? document.body.className : ''"
+        ) or ""
+    except Exception:  # noqa: BLE001 - 取不到 class 不影响主判据
+        cls = ""
+    return url, title, f"{title}\n{text}\n{cls}"
+
+
+def _poll_state(page):
+    """读一次页面状态：(state, url, title, blob)，state ∈ {"ok","closed"}。
+
+    **页面跳转的那一瞬间 `page.evaluate` 会抛 Error**（execution context was
+    destroyed / navigation）。第一版把所有异常都当成「用户关了窗口」，
+    于是登录刚提交、页面正在跳转时就报 `登录窗口已关闭（Error）` 直接放弃 ——
+    实测踩过。真正的关窗判据只有 `page.is_closed()`。
+    """
+    for attempt in range(3):
+        checker = getattr(page, "is_closed", None)
+        if callable(checker):
+            try:
+                if checker():
+                    return "closed", "", "", ""
+            except Exception:  # noqa: BLE001
+                return "closed", "", "", ""
+        try:
+            url, title, blob = _snapshot(page)
+            return "ok", url, title, blob
+        except Exception:  # noqa: BLE001 - 多半是正在跳转，稍等再读
+            try:
+                page.wait_for_timeout(250)
+            except Exception:  # noqa: BLE001
+                return "closed", "", "", ""
+    return "closed", "", "", ""
 
 
 def looks_logged_in(
@@ -204,19 +268,14 @@ class LoginSession:
         deadline = started + self.timeout_s
         while True:
             elapsed = time.monotonic() - started
-            try:
-                url = page.url
-                title = page.title() or ""
-                text = page.evaluate(
-                    "() => document.body ? document.body.innerText : ''"
-                ) or ""
-            except Exception as exc:  # noqa: BLE001 - 用户关窗口是正常路径
+            state, url, title, blob = _poll_state(page)
+            if state == "closed":  # 用户关窗口是正常路径，不是错误
                 return LoginResult(
                     ok=False, site_id=self.site.id, cancelled=True,
-                    message=f"登录窗口已关闭（{type(exc).__name__}）",
+                    message="登录窗口已关闭",
                     elapsed_s=round(elapsed, 1),
                 )
-            if looks_logged_in(url, title, text, self.site.login_success_pattern):
+            if looks_logged_in(url, title, blob, self.site.login_success_pattern):
                 return LoginResult(
                     ok=True, site_id=self.site.id, url=url,
                     message="登录成功，登录态已保存",
@@ -312,3 +371,285 @@ def login_state(config: dict[str, Any], project_root: Path, site: Site) -> dict:
         "hosts": matched,
         "reason": "profile 里已有该站 Cookie" if matched else "profile 里没有该站 Cookie",
     }
+
+
+# ---------------------------------------------------------------------------
+# 自动登录（用本地凭据文件填表，不需要人操作）
+#
+# 凭据放在 exe / 项目根目录的 credentials.yaml，**永不进仓库、永不进发布包**：
+#
+#   sites:
+#     galgame.dev:
+#       username: "someone@example.com"
+#       password: "..."
+#
+# 为什么单独一个文件、不写进 config.yaml：config.yaml 是**跟踪进 git** 的，
+# 而且是发布包里给所有人看的模板。把它写成凭据就会跟着推上去。
+# ---------------------------------------------------------------------------
+
+
+def credentials_path(project_root: Path) -> Path:
+    return Path(project_root) / CREDENTIALS_FILE
+
+
+def load_credentials(project_root: Path) -> dict[str, dict]:
+    """读 credentials.yaml。没有 / 读坏了都返回 {}（自动登录直接不可用）。"""
+    path = credentials_path(project_root)
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001 - 配置写坏不能把搜索搞崩
+        log.warning("credentials.yaml 读不出来，自动登录停用：%s", exc)
+        return {}
+    sites = data.get("sites") if isinstance(data, dict) else None
+    if not isinstance(sites, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for site_id, entry in sites.items():
+        if not isinstance(entry, dict):
+            continue
+        user = str(entry.get("username") or "").strip()
+        pwd = str(entry.get("password") or "")
+        if user and pwd:
+            out[str(site_id)] = {"username": user, "password": pwd}
+    return out
+
+
+def credentials_for(project_root: Path, site: Site) -> dict | None:
+    """该站的凭据；没有就 None。"""
+    return load_credentials(project_root).get(site.id)
+
+
+def _state_path(project_root: Path) -> Path:
+    return Path(project_root) / "data" / "login-state.json"
+
+
+def mark_logged_in(project_root: Path, site_id: str) -> None:
+    """记下「这个站刚刚登录成功」，用于避免每次搜索都重新登录。"""
+    import json
+    import time
+
+    path = _state_path(project_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        data[str(site_id)] = {"at": time.time()}
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - 记不下来只影响节流，不影响登录
+        log.debug("写 login-state.json 失败：%s", exc)
+
+
+def last_login_at(project_root: Path, site_id: str) -> float | None:
+    import json
+
+    path = _state_path(project_root)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) or {}
+        at = (data.get(str(site_id)) or {}).get("at")
+        return float(at) if at else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def should_refresh(
+    config: dict[str, Any], project_root: Path, site: Site, *, force: bool = False
+) -> bool:
+    """是否值得再跑一次自动登录。
+
+    Cookie 里有条目 ≠ 还有效（实测：galgame.dev 的 express.sid 早就过期了，
+    但 `login_state` 只看「有没有条目」→ 报已登录 → 搜索仍然撞墙）。
+    所以不能只看 Cookie，还要看**上次成功登录是什么时候**。
+    """
+    if force:
+        return True
+    cfg = (config or {}).get("login") or {}
+    try:
+        hours = float(cfg.get("refresh_hours") or 12)
+    except (TypeError, ValueError):
+        hours = 12.0
+    at = last_login_at(project_root, site.id)
+    if at is None:
+        return True
+    import time
+
+    return (time.time() - at) > hours * 3600
+
+
+def _visible(page, selector: str):
+    """选择器下第一个可见元素；没有就 None。"""
+    try:
+        loc = page.locator(selector).first
+        if loc.count() == 0:
+            return None
+        if not loc.is_visible(timeout=1000):
+            return None
+        return loc
+    except Exception:  # noqa: BLE001 - 选择器打空是正常情况
+        return None
+
+
+def _first_fillable(page, selectors: tuple[str, ...]):
+    for sel in selectors:
+        loc = _visible(page, sel)
+        if loc is not None:
+            return loc
+    return None
+
+
+def _click_submit(page) -> bool:
+    """点「登录」按钮。返回是否点到。
+
+    先按文案找（多语言），再退回第一个可见的 submit —— 有些主题按钮里
+    只有图标没有文字。最后退回在密码框上按回车。
+    """
+    script = """(texts) => {
+      const cands = Array.from(document.querySelectorAll(
+        'button[type=submit], input[type=submit], button'));
+      const norm = s => (s || '').trim().toLowerCase();
+      let hit = cands.find(b => texts.includes(norm(b.innerText || b.value)));
+      if (!hit) hit = cands.find(b => b.type === 'submit' &&
+                                 !!(b.offsetWidth || b.offsetHeight));
+      if (!hit) return false;
+      hit.click();
+      return true;
+    }"""
+    try:
+        if page.evaluate(script, list(SUBMIT_TEXTS)):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        loc = _visible(page, "input[type=password]")
+        if loc is not None:
+            loc.press("Enter")
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def auto_login(
+    config: dict[str, Any],
+    project_root: Path,
+    site: Site,
+    credentials: dict,
+    *,
+    timeout_s: int | None = None,
+    session_factory: Callable[..., Any] | None = None,
+) -> LoginResult:
+    """用账号密码自动登录一次（无头，不开窗口）。登录态落在主 profile 里。
+
+    失败不会抛异常，返回 ok=False 的 LoginResult —— 调用方据此退回
+    「打开浏览器手动登录」那条路，绝不能因为自动登录挂了就让整站失败。
+    """
+    started = time.monotonic()
+    page_obj = Path(project_root)
+    cfg = (config or {}).get("login") or {}
+    if timeout_s is None:
+        try:
+            timeout_s = int(cfg.get("auto_timeout_s") or AUTO_TIMEOUT_S)
+        except (TypeError, ValueError):
+            timeout_s = AUTO_TIMEOUT_S
+    deadline = time.monotonic() + timeout_s
+
+    from .browser import BrowserSession
+
+    factory = session_factory or BrowserSession
+    try:
+        sess = factory(config, page_obj).__enter__()
+    except Exception as exc:  # noqa: BLE001
+        return LoginResult(ok=False, site_id=site.id,
+                           message=f"打不开浏览器：{type(exc).__name__}: {str(exc)[:120]}",
+                           elapsed_s=round(time.monotonic() - started, 1))
+    try:
+        page = sess.new_page()
+        url = login_url_for(site) or site.homepage
+        page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        page.wait_for_timeout(1200)
+
+        # 已经是登录态就别再提交表单（重复登录会踢掉会话，也可能触发风控）
+        cur_url, cur_title, cur_blob = _snapshot(page)
+        if looks_logged_in(cur_url, cur_title, cur_blob, site.login_success_pattern):
+            mark_logged_in(page_obj, site.id)
+            return LoginResult(ok=True, site_id=site.id, url=cur_url,
+                               message="本来就是登录状态",
+                               elapsed_s=round(time.monotonic() - started, 1))
+
+        pwd = _first_fillable(page, PASSWORD_SELECTORS)
+        user = _first_fillable(page, USERNAME_SELECTORS)
+        if pwd is None or user is None:
+            return LoginResult(ok=False, site_id=site.id, url=cur_url,
+                               message="登录页上找不到账号/密码输入框",
+                               elapsed_s=round(time.monotonic() - started, 1))
+        user.fill(credentials["username"])
+        pwd.fill(credentials["password"])
+        if not _click_submit(page):
+            return LoginResult(ok=False, site_id=site.id, url=cur_url,
+                               message="登录页上找不到提交按钮",
+                               elapsed_s=round(time.monotonic() - started, 1))
+
+        prev_err = ""
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(700)
+            state2, url2, title2, blob2 = _poll_state(page)
+            if state2 == "closed":
+                return LoginResult(ok=False, site_id=site.id, cancelled=True,
+                                   message="登录窗口已关闭",
+                                   elapsed_s=round(time.monotonic() - started, 1))
+            if looks_logged_in(url2, title2, blob2, site.login_success_pattern):
+                mark_logged_in(page_obj, site.id)
+                return LoginResult(ok=True, site_id=site.id, url=url2,
+                                   message="登录成功",
+                                   elapsed_s=round(time.monotonic() - started, 1))
+            # 登录失败时站点会在表单里回显原因（密码错、需要验证码…），
+            # 把它带出去比等满超时有用得多。但要**连续两次读到同一条**才算数：
+            # 提交瞬间页面上常有转瞬即逝的提示，读一次就下结论会误判（实测踩过）。
+            err = _login_error(page)
+            if err and "csrf" not in err.lower():
+                if err == prev_err:
+                    return LoginResult(ok=False, site_id=site.id, url=url2,
+                                       message=f"登录被拒绝：{err}",
+                                       elapsed_s=round(time.monotonic() - started, 1))
+                prev_err = err
+        url3 = ""
+        try:
+            url3 = page.url
+        except Exception:  # noqa: BLE001
+            pass
+        return LoginResult(ok=False, site_id=site.id, url=url3,
+                           message=f"自动登录 {timeout_s} 秒内没成功",
+                           elapsed_s=round(time.monotonic() - started, 1))
+    finally:
+        try:
+            sess.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# 这些是提示不是错误：Playwright 用 fill() 填表会触发 NodeBB 的
+# 「大写锁定已启用」提示，第一版把它当登录失败直接放弃了 —— 实测误报。
+_BENIGN_ERROR_MARKERS = ("大写锁定", "caps lock", "capslock")
+
+
+def _login_error(page) -> str:
+    """登录页回显的错误文案（没有就空串）。"""
+    try:
+        text = page.evaluate("""() => {
+          const nodes = document.querySelectorAll(
+            '.alert-danger, .alert-error, [role=alert], .form-error');
+          return Array.from(nodes).map(n => (n.innerText || '').trim())
+                      .filter(Boolean).join(' | ').slice(0, 160);
+        }""") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    low = text.lower()
+    if any(mark in low for mark in _BENIGN_ERROR_MARKERS):
+        return ""
+    return text

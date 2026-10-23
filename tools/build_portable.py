@@ -28,6 +28,9 @@ APP_DIR = DIST / "game-finder"
 # 首次运行会生成、不该进发布包的东西
 RUNTIME_ARTIFACTS = (
     "data", "logs", "run.log", "run2.log",
+    # 本地登录凭据：**绝不能进发布包**（发布包是公开下载的）。
+    # 打完 zip 后会把本地那份放回去，见 restore_local_credentials()。
+    "credentials.yaml",
     "chrome-profile", "chrome-profile-w0", "chrome-profile-w1",
     "chrome-profile-w2", "chrome-profile-sweep0",
 )
@@ -78,6 +81,19 @@ def make_zip() -> Path:
     return out
 
 
+def restore_local_credentials() -> None:
+    """把本机那份 credentials.yaml 放回 dist 目录。
+
+    为什么要有这一步：凭据绝不能进**公开下载**的 zip，但本机自用的
+    dist/game-finder/ 又确实需要它才能自动登录。于是 zip 里剔掉、
+    打包完再放回文件夹 —— 两个诉求各自满足。
+    """
+    src = ROOT / "credentials.yaml"
+    if src.exists():
+        shutil.copy2(src, APP_DIR / "credentials.yaml")
+        print("[zip] credentials.yaml 未打进 zip，但已放回 dist/game-finder/（本机自用）")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-zip", action="store_true", help="只构建，不打包 zip")
@@ -87,6 +103,7 @@ def main(argv: list[str] | None = None) -> None:
     clean_runtime_artifacts()
     if not args.no_zip:
         make_zip()
+    restore_local_credentials()
 
 
 if __name__ == "__main__":
